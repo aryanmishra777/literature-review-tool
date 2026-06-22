@@ -1,0 +1,35 @@
+# Secrets / local config
+# .env holds real credentials — never commit it (use .env.example instead).
+.env
+
+# Tool runtime artifacts
+# enrichment_cache.json is the on-disk DOI enrichment cache.
+enrichment_cache.json
+# Scraped reference docs (e.g. Cloudflare_docs_chunks/).
+*_docs_chunks/
+*_docs_chunks/*.md
+
+# Generated literature reviews
+# Every run writes a <slug>.md; ignore them all but keep the README.
+*.md
+!README.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Virtualenvs
+venv/
+.venv/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
