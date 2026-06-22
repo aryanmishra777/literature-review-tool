@@ -191,6 +191,11 @@ The codebase is deliberately split into small, single-purpose modules (none exce
 ~150 lines). Each stage of the pipeline maps to a file or package, and the orchestration
 lives in `pipeline.py`.
 
+> **Why is it built this way?** See [`DESIGN.md`](DESIGN.md) for the rationale behind the
+> major decisions (Crossref over scraping, DOI-keyed enrichment, lexical ranking, the
+> synthesis cap, …), the alternatives that were weighed, and where the tool could go next.
+> Read the relevant entry before changing a stage — most choices have a non-obvious reason.
+
 ```
 lr_tool/
 ├── cli.py                  # Entry point: parse args, dispatch JSON vs interactive flow
@@ -328,6 +333,8 @@ fields, uses a `*_checked` negative-cache marker, and never raises. Then call it
 
 - **Ranking is lexical** (token cosine), so scores are modest and synonyms aren't matched.
   The query-understanding step mitigates this by translating to canonical terms first.
+  See [`DESIGN.md` §5](DESIGN.md) for why this is a deliberate floor and how to upgrade it
+  (dense embeddings via the Ollama endpoint you already have).
 - **Abstracts depend on OpenAlex** coverage; a paper absent from OpenAlex may stay
   abstract-less (it then contributes only its title score to ranking).
 - **The ACM source is unreliable** — Cloudflare's managed challenge usually blocks the

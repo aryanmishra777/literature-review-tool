@@ -10,9 +10,10 @@ enrichment_cache.json
 *_docs_chunks/*.md
 
 # Generated literature reviews
-# Every run writes a <slug>.md; ignore them all but keep the README.
+# Every run writes a <slug>.md; ignore them all but keep the docs we track.
 *.md
 !README.md
+!DESIGN.md
 
 # Python
 __pycache__/
