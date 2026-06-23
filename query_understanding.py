@@ -18,6 +18,12 @@ Map lay phrasing to the established academic term for the SAME concept, e.g.:
   "teaching kids to code"                          -> "computing education / CS education"
   "spotting fake reviews online"                   -> "fake review detection / opinion spam"
 
+You produce TWO search phrases at different breadths, because retrieval runs both:
+  • a BROAD topic phrase for recall (the bare canonical term), and
+  • a FOCUSED phrase for precision that keeps the SPECIFIC angle the user asked about.
+A faceted question like "what characteristics tell us someone understood an algorithm"
+is about *assessing* comprehension, not all of it — the focused phrase must preserve that.
+
 Stay faithful to the user's intent. Do NOT drift to unrelated concepts or invent
 topics the user did not ask about. If the topic has no standard academic term,
 keep the user's clearest phrasing.
@@ -33,6 +39,12 @@ Analyze this research query and return a JSON object with exactly these fields:
   directly to the search engine, so prefer canonical terms over the user's literal words.
   (e.g. "how well someone grasps an algorithm" -> "program comprehension", NOT
   "metrics for program comprehension".)
+- "focus_query": a more specific phrase capturing the user's PARTICULAR angle on the
+  topic. Combine the canonical term with the specific aspect they asked about, and HERE
+  you DO keep the qualifier words refined_query drops (e.g. "how do we know someone
+  understood an algorithm well" -> "assessing program comprehension"; "what makes SQL
+  generation from text accurate" -> "text-to-SQL accuracy evaluation"). Set this to null
+  when the query is a plain topic with no narrowing aspect (then refined_query alone is used).
 - "keywords": list of the canonical technical/field terms for the topic (the
   established academic terms — not just words copied verbatim from the query).
   Related sub-topics are fine here; keep them out of refined_query.

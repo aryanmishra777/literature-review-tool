@@ -7,7 +7,10 @@ from retrieval.base import BaseTranslator
 from retrieval.crossref.client import SELECT, fetch_message, make_session
 from retrieval.crossref.parse import parse_item
 
-_MAX_ROWS_PER_REQUEST = 100  # Crossref allows up to 1000; 100 keeps payloads sane.
+# Crossref allows up to 1000 rows/request, but our SELECT includes `abstract` (bulky
+# JATS XML), so big pages can blow past the read timeout. 50 mirrors the page size that
+# the default limit already fetches reliably; we just send more pages when asked for more.
+_MAX_ROWS_PER_REQUEST = 50
 _CURSOR_HARD_CAP = 1000      # safety ceiling when the caller asks for "unlimited".
 
 

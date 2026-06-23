@@ -15,12 +15,33 @@ from ranking import rank
 from result import build_result
 from retrieval import get_translator
 from search_query import build_search_query
+from semantic import semantic_scores
 from synthesis import Synthesizer, select_for_synthesis
 
 
 def _log(msg: str) -> None:
     """All progress chatter goes to stderr so stdout stays clean for ``--json``."""
     print(msg, file=sys.stderr, flush=True)
+
+
+def _merge_by_doi(*passes: list[CSLRecord]) -> list[CSLRecord]:
+    """Union several retrieval passes into one candidate pool, deduped by DOI.
+
+    A faceted query is searched twice — a broad topic pass (recall) and a focused pass
+    (precision) — and the same work can surface in both. We keep the first occurrence of
+    each DOI (metadata is identical across passes, both being Crossref). Order is
+    irrelevant downstream because ranking re-sorts the whole pool anyway.
+    """
+    seen: set[str] = set()
+    merged: list[CSLRecord] = []
+    for records in passes:
+        for rec in records:
+            key = rec.DOI or rec.id
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(rec)
+    return merged
 
 
 class LiteratureReviewPipeline:
@@ -31,12 +52,14 @@ class LiteratureReviewPipeline:
         api_key: str = OLLAMA_API_KEY,
         source: str = "crossref",
         enrich: bool = True,
+        semantic: bool = True,
     ):
         self._qu = QueryUnderstanding(model=model, host=ollama_host, api_key=api_key)
         self._translator = get_translator(source)
         self._synthesizer = Synthesizer(model=model, host=ollama_host, api_key=api_key)
         self._source = source
         self._enrich = enrich
+        self._semantic = semantic
         self.model = model
 
     def run_retrieval(
@@ -52,9 +75,17 @@ class LiteratureReviewPipeline:
         search = build_search_query(structured.refined_query, structured.keywords)
         shown_limit = limit if limit is not None else "unlimited"
         _log(f"[2/4] Retrieving from {self._source} (limit={shown_limit}, workers={workers})...")
-        _log(f'      search   : "{search}"')
+        _log(f'      search   : "{search}"  (broad / recall)')
         raw_records = self._translator.search(search, limit=limit, workers=workers)
-        _log(f"      fetched {len(raw_records)} records")
+
+        # Faceted queries get a second, narrower pass so the user's specific angle
+        # actually reaches Crossref instead of being flattened to the bare topic.
+        if structured.focus_query:
+            focus_search = build_search_query(structured.focus_query, structured.keywords)
+            _log(f'      focus    : "{focus_search}"  (focused / precision)')
+            focus_records = self._translator.search(focus_search, limit=limit, workers=workers)
+            raw_records = _merge_by_doi(focus_records, raw_records)
+        _log(f"      fetched {len(raw_records)} unique records")
 
         _log("[2b]  Processing (schema enforcement)...")
         records = process_records(raw_records)
@@ -64,8 +95,18 @@ class LiteratureReviewPipeline:
             _log("[2c]  Enriching metadata (abstracts, OA links, citations)...")
             records = enrich_pre_rank(records)
 
-        _log("[3/4] Ranking by relevance (intent-aware)...")
-        ranked = rank(records, structured.refined_query, structured.keywords, original_query=query)
+        sem = None
+        if self._semantic:
+            _log("[3a]  Scoring semantic similarity (SBERT embeddings)...")
+            sem = semantic_scores(query or structured.refined_query, records)
+
+        _log("[3/4] Ranking by relevance (semantic + lexical, citation-aware)...")
+        ranked = rank(records, structured.refined_query, structured.keywords,
+                      original_query=query, semantic_scores=sem)
+        # The two passes can union to more than the caller asked for; keep the best `limit`
+        # after ranking so a richer, more on-intent pool still honours --limit.
+        if limit is not None:
+            ranked = ranked[:limit]
         return structured, records, ranked
 
     def synthesize(

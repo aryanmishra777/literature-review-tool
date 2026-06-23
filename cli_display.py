@@ -6,7 +6,7 @@ def print_ranked(ranked: list, cap: int | None = None) -> None:
     """Print the ranked papers as a numbered list with scores, authors, year, and DOI."""
     papers = ranked[:cap] if cap else ranked
     print("=" * 72)
-    print(f"RANKED PAPERS  ({len(papers)} shown, score = 0.8×title + 0.2×abstract cosine)")
+    print(f"RANKED PAPERS  ({len(papers)} shown, score = relevance × citation impact)")
     print("=" * 72)
     for i, r in enumerate(papers, 1):
         rec = r.record

@@ -31,11 +31,12 @@ python cli.py "what makes an algorithm easy to understand"
 
 ```
 query
-  → [1] query understanding   (LLM: lay phrasing → academic terminology)
-  → [2] retrieval             (Crossref REST API → CSLRecords)
+  → [1] query understanding   (LLM: lay phrasing → broad + focused academic phrases)
+  → [2] retrieval             (Crossref REST API, two-pass broad+focused → merged CSLRecords)
   → [2b] processing           (schema normalization)
   → [2c] enrichment           (OpenAlex / Unpaywall fill abstracts, OA links, citations)
-  → [3] ranking               (cosine: 0.8 × title + 0.2 × abstract)
+  → [3a] semantic scoring      (SBERT embeddings; skipped with --no-semantic)
+  → [3] ranking               (0.8·semantic + 0.2·lexical, × citation impact)
   → [3b] TLDR enrichment       (Semantic Scholar, top-K only)
   → [4] synthesis             (LLM writes the review)
   → Markdown / JSON output
@@ -43,11 +44,16 @@ query
 
 1. **Query understanding** — an Ollama LLM rewrites your question into the canonical
    terms scholarly papers actually use (e.g. *"how well someone grasps an algorithm"* →
-   *"program comprehension"*), extracts keywords, and classifies intent.
+   *"program comprehension"*), extracts keywords, and classifies intent. For a faceted
+   question it also emits a narrower `focus_query` (e.g. *"assessing program comprehension"*)
+   that preserves the specific angle the broad term drops.
 2. **Retrieval** — queries the **Crossref** REST API, the canonical DOI metadata registry
    that publishers (ACM included) deposit to at publication time. No scraping, no anti-bot
-   walls. An ACM Digital Library scraper remains available as a best-effort fallback
-   (`--source acm`), but `dl.acm.org` is behind Cloudflare and it usually returns nothing.
+   walls. Faceted queries run **two passes** — the broad topic (recall) and the focused
+   phrase (precision) — merged and deduped by DOI, so the user's specific angle reaches the
+   results instead of being flattened to the bare topic. An ACM Digital Library scraper
+   remains available as a best-effort fallback (`--source acm`), but `dl.acm.org` is behind
+   Cloudflare and it usually returns nothing.
 3. **Enrichment** — Crossref is thin on abstracts, so we fill the gaps by joining other
    free APIs on the **normalized DOI**:
    - **OpenAlex** → abstracts (rebuilt from an inverted index), OA links, citation counts (batched)
@@ -55,8 +61,13 @@ query
    - **Semantic Scholar** → one-line TLDR summaries for the top-ranked papers
    Results are cached on disk by DOI (`enrichment_cache.json`), so re-runs are fast.
    Disable the whole stage with `--no-enrich`.
-4. **Ranking** — scores papers by cosine similarity (`0.8 × title + 0.2 × abstract`).
-   Enrichment runs *first* so the abstract term actually has text to work with.
+4. **Ranking** — scores relevance as a hybrid of a **semantic** signal (SBERT embedding
+   cosine, `all-MiniLM-L6-v2`) and a **lexical** signal (`0.8 × title + 0.2 × abstract`
+   token cosine), blended `0.8 × semantic + 0.2 × lexical`, then amplified by citation impact
+   (`final = relevance × (1 + impact)`). Embeddings separate *"program comprehension"*
+   (software) from *"reading comprehension program"* (education) — token overlap can't.
+   Runs in-process via `sentence-transformers`, vectors cached by DOI; falls back to
+   lexical-only when the library is absent or `--no-semantic` is passed.
 5. **Synthesis** — the LLM writes a structured review over a bounded slice of the top
    papers (capped so the prompt can never exceed the model's context window).
 6. **Output** — writes a Markdown file and can also emit structured JSON.
@@ -87,6 +98,12 @@ pip install -r requirements.txt
 playwright install chromium   # only needed for the ACM fallback
 ```
 
+`requirements.txt` includes `sentence-transformers` (pulls PyTorch, ~200 MB) for the
+semantic ranking signal. The model (`all-MiniLM-L6-v2`, ~80 MB) downloads on first use and
+is cached. To skip all of this, drop that line and run with `--no-semantic` — the tool then
+ranks lexically with no extra dependency. An Intel XPU (Arc) or CUDA torch build is
+auto-detected for faster encoding; plain CPU is fine for the small batches we embed.
+
 ---
 
 ## Configuration
@@ -113,8 +130,8 @@ CONTACT_EMAIL=you@example.com
 
 ```
 python cli.py [-h] [--source {crossref,acm}] [--model MODEL] [--ollama-host URL]
-              [--limit N] [--no-synthesis] [--no-enrich] [--no-save]
-              [--out-dir DIR] [--workers N] [--json]
+              [--limit N] [--no-synthesis] [--no-enrich] [--no-semantic]
+              [--no-save] [--out-dir DIR] [--workers N] [--json]
               query
 ```
 
@@ -127,6 +144,7 @@ python cli.py [-h] [--source {crossref,acm}] [--model MODEL] [--ollama-host URL]
 | `--limit N` | Max papers to retrieve (default: 50; use `0` for no limit). Crossref returns by relevance, so the first ~50 carry the signal. |
 | `--no-synthesis` | Skip LLM synthesis; only show the ranked paper list |
 | `--no-enrich` | Skip metadata enrichment (abstracts/OA/TLDR); faster, offline-friendly |
+| `--no-semantic` | Skip SBERT embedding ranking; use lexical scoring only (deterministic, no model load) |
 | `--no-save` | Do not write a Markdown file to disk |
 | `--out-dir DIR` | Directory for the output `.md` file (default: current directory) |
 | `--workers N` | Concurrent page fetches; **only used by `--source acm`** (default: 4) |
@@ -167,7 +185,7 @@ and the generated review, then saves a Markdown file named after the query (skip
 
 ```json
 {
-  "structured_query": { "refined_query": "...", "keywords": ["..."], "intent": "theory" },
+  "structured_query": { "refined_query": "...", "focus_query": "...", "keywords": ["..."], "intent": "theory" },
   "records_retrieved": 50,
   "ranked": [
     {
@@ -203,7 +221,7 @@ lr_tool/
 ├── cli_display.py          #   └─ terminal rendering (print_ranked) + the top-k prompt
 │
 ├── pipeline.py             # Orchestrates the stages (LiteratureReviewPipeline)
-├── search_query.py         #   └─ build the Crossref search string from the refined query
+├── search_query.py         #   └─ build a Crossref search string from a query phrase
 ├── result.py               #   └─ assemble the final result dict (JSON/Markdown shape)
 │
 ├── config.py               # Loads .env; exposes OLLAMA_*, DEFAULT_MODEL, CONTACT_EMAIL, USER_AGENT
@@ -234,7 +252,8 @@ lr_tool/
 │   ├── semantic_scholar.py #        TLDR summaries (batched)
 │   └── stages.py           #        public entry points: enrich_pre_rank, enrich_tldr
 │
-├── ranking.py              # [3]  cosine similarity ranking
+├── ranking.py              # [3]  hybrid (semantic + lexical) × citation-impact ranking
+├── semantic.py             #   └─ SBERT embeddings + DOI-cached vectors (semantic signal)
 ├── synthesis.py            # [4]  LLM review generation + synthesis-set selection
 ├── urls.py                 #      is.gd URL shortening (used by output)
 └── output.py               #      Markdown file generation
@@ -255,7 +274,7 @@ Defined in `models.py` (Pydantic):
 
 | Model | Purpose |
 |---|---|
-| `StructuredQuery` | LLM output: `refined_query`, `keywords`, `intent` |
+| `StructuredQuery` | LLM output: `refined_query` (broad/recall), `focus_query` (narrow/precision, optional), `keywords`, `intent` |
 | `Author` | `given` / `family` name parts |
 | `CSLRecord` | One paper, in a CSL-JSON-ish shape. The currency of the whole pipeline. |
 | `MetadataMissingness` | Flags (`abstract_missing`, `oa_missing`, `tldr_missing`) the ranker and output consult |
@@ -331,9 +350,11 @@ fields, uses a `*_checked` negative-cache marker, and never raises. Then call it
 
 ## Known limitations
 
-- **Ranking is lexical** (token cosine), so scores are modest and synonyms aren't matched.
-  The query-understanding step mitigates this by translating to canonical terms first.
-  See [`DESIGN.md` §5](DESIGN.md) for why this is a deliberate floor and how to upgrade it
+- **Ranking is a semantic+lexical hybrid.** The SBERT term handles synonyms/paraphrase and
+  cross-domain disambiguation; the lexical term is the deterministic, offline fallback (used
+  when `sentence-transformers` is absent or `--no-semantic` is passed). Citation impact then
+  amplifies relevance, which tilts ranking toward older (more-cited) work — see
+  [`DESIGN.md` §5](DESIGN.md) for the recency caveat, the blend/`β` dials, and next steps
   (dense embeddings via the Ollama endpoint you already have).
 - **Abstracts depend on OpenAlex** coverage; a paper absent from OpenAlex may stay
   abstract-less (it then contributes only its title score to ranking).

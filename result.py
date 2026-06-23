@@ -36,6 +36,7 @@ def build_result(
                 "score": round(r.final_score, 4),
                 "title_score": round(r.title_score, 4),
                 "abstract_score": round(r.abstract_score, 4),
+                "semantic_score": round(r.semantic_score, 4),
                 "abstract_missing": r.record.metadata_missingness.abstract_missing,
             }
             for r in ranked[:top_k]

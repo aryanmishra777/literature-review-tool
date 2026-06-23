@@ -4,8 +4,9 @@ from pydantic import BaseModel, Field
 
 
 class StructuredQuery(BaseModel):
-    refined_query: str
+    refined_query: str                     # broad canonical topic — drives the recall pass
     keywords: list[str]
+    focus_query: Optional[str] = None      # the user's specific angle — drives the precision pass
     intent: Optional[Literal["survey", "implementation", "theory"]] = None
 
 
@@ -41,4 +42,5 @@ class RankedRecord(BaseModel):
     record: CSLRecord
     title_score: float = 0.0
     abstract_score: float = 0.0
+    semantic_score: float = 0.0     # embedding cosine; 0.0 when semantic ranking is off
     final_score: float = 0.0
