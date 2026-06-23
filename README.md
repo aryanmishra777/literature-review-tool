@@ -31,11 +31,11 @@ python cli.py "what makes an algorithm easy to understand"
 
 ```
 query
-  → [1] query understanding   (LLM: lay phrasing → academic terminology)
-  → [2] retrieval             (Crossref REST API → CSLRecords)
+  → [1] query understanding   (LLM: lay phrasing → broad + focused academic phrases)
+  → [2] retrieval             (Crossref REST API, two-pass broad+focused → merged CSLRecords)
   → [2b] processing           (schema normalization)
   → [2c] enrichment           (OpenAlex / Unpaywall fill abstracts, OA links, citations)
-  → [3] ranking               (cosine: 0.8 × title + 0.2 × abstract)
+  → [3] ranking               (relevance cosine × citation impact)
   → [3b] TLDR enrichment       (Semantic Scholar, top-K only)
   → [4] synthesis             (LLM writes the review)
   → Markdown / JSON output
@@ -43,11 +43,16 @@ query
 
 1. **Query understanding** — an Ollama LLM rewrites your question into the canonical
    terms scholarly papers actually use (e.g. *"how well someone grasps an algorithm"* →
-   *"program comprehension"*), extracts keywords, and classifies intent.
+   *"program comprehension"*), extracts keywords, and classifies intent. For a faceted
+   question it also emits a narrower `focus_query` (e.g. *"assessing program comprehension"*)
+   that preserves the specific angle the broad term drops.
 2. **Retrieval** — queries the **Crossref** REST API, the canonical DOI metadata registry
    that publishers (ACM included) deposit to at publication time. No scraping, no anti-bot
-   walls. An ACM Digital Library scraper remains available as a best-effort fallback
-   (`--source acm`), but `dl.acm.org` is behind Cloudflare and it usually returns nothing.
+   walls. Faceted queries run **two passes** — the broad topic (recall) and the focused
+   phrase (precision) — merged and deduped by DOI, so the user's specific angle reaches the
+   results instead of being flattened to the bare topic. An ACM Digital Library scraper
+   remains available as a best-effort fallback (`--source acm`), but `dl.acm.org` is behind
+   Cloudflare and it usually returns nothing.
 3. **Enrichment** — Crossref is thin on abstracts, so we fill the gaps by joining other
    free APIs on the **normalized DOI**:
    - **OpenAlex** → abstracts (rebuilt from an inverted index), OA links, citation counts (batched)
@@ -55,8 +60,10 @@ query
    - **Semantic Scholar** → one-line TLDR summaries for the top-ranked papers
    Results are cached on disk by DOI (`enrichment_cache.json`), so re-runs are fast.
    Disable the whole stage with `--no-enrich`.
-4. **Ranking** — scores papers by cosine similarity (`0.8 × title + 0.2 × abstract`).
-   Enrichment runs *first* so the abstract term actually has text to work with.
+4. **Ranking** — scores papers by lexical relevance (`0.8 × title + 0.2 × abstract` cosine),
+   then amplifies by citation impact (`final = relevance × (1 + impact)`) so seminal work
+   rises and uncited notes sink — without ever surfacing an off-topic paper. Enrichment runs
+   *first* so the abstract term and citation counts are populated before scoring.
 5. **Synthesis** — the LLM writes a structured review over a bounded slice of the top
    papers (capped so the prompt can never exceed the model's context window).
 6. **Output** — writes a Markdown file and can also emit structured JSON.
@@ -167,7 +174,7 @@ and the generated review, then saves a Markdown file named after the query (skip
 
 ```json
 {
-  "structured_query": { "refined_query": "...", "keywords": ["..."], "intent": "theory" },
+  "structured_query": { "refined_query": "...", "focus_query": "...", "keywords": ["..."], "intent": "theory" },
   "records_retrieved": 50,
   "ranked": [
     {
@@ -203,7 +210,7 @@ lr_tool/
 ├── cli_display.py          #   └─ terminal rendering (print_ranked) + the top-k prompt
 │
 ├── pipeline.py             # Orchestrates the stages (LiteratureReviewPipeline)
-├── search_query.py         #   └─ build the Crossref search string from the refined query
+├── search_query.py         #   └─ build a Crossref search string from a query phrase
 ├── result.py               #   └─ assemble the final result dict (JSON/Markdown shape)
 │
 ├── config.py               # Loads .env; exposes OLLAMA_*, DEFAULT_MODEL, CONTACT_EMAIL, USER_AGENT
@@ -234,7 +241,7 @@ lr_tool/
 │   ├── semantic_scholar.py #        TLDR summaries (batched)
 │   └── stages.py           #        public entry points: enrich_pre_rank, enrich_tldr
 │
-├── ranking.py              # [3]  cosine similarity ranking
+├── ranking.py              # [3]  relevance (cosine) × citation-impact ranking
 ├── synthesis.py            # [4]  LLM review generation + synthesis-set selection
 ├── urls.py                 #      is.gd URL shortening (used by output)
 └── output.py               #      Markdown file generation
@@ -255,7 +262,7 @@ Defined in `models.py` (Pydantic):
 
 | Model | Purpose |
 |---|---|
-| `StructuredQuery` | LLM output: `refined_query`, `keywords`, `intent` |
+| `StructuredQuery` | LLM output: `refined_query` (broad/recall), `focus_query` (narrow/precision, optional), `keywords`, `intent` |
 | `Author` | `given` / `family` name parts |
 | `CSLRecord` | One paper, in a CSL-JSON-ish shape. The currency of the whole pipeline. |
 | `MetadataMissingness` | Flags (`abstract_missing`, `oa_missing`, `tldr_missing`) the ranker and output consult |
@@ -331,9 +338,10 @@ fields, uses a `*_checked` negative-cache marker, and never raises. Then call it
 
 ## Known limitations
 
-- **Ranking is lexical** (token cosine), so scores are modest and synonyms aren't matched.
-  The query-understanding step mitigates this by translating to canonical terms first.
-  See [`DESIGN.md` §5](DESIGN.md) for why this is a deliberate floor and how to upgrade it
+- **Relevance is lexical** (token cosine), so synonyms aren't matched directly; the
+  query-understanding step mitigates this by translating to canonical terms first. Citation
+  impact then amplifies the relevance score, which also tilts ranking toward older (more-cited)
+  work — see [`DESIGN.md` §5](DESIGN.md) for the recency caveat, the `β` dial, and how to upgrade it
   (dense embeddings via the Ollama endpoint you already have).
 - **Abstracts depend on OpenAlex** coverage; a paper absent from OpenAlex may stay
   abstract-less (it then contributes only its title score to ranking).

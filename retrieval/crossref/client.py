@@ -15,7 +15,7 @@ from config import USER_AGENT
 # across title/author/container, which is exactly what we want for a topic query.
 WORKS_URL = "https://api.crossref.org/works"
 
-_TIMEOUT = 25            # seconds to wait on any single request
+_TIMEOUT = 40            # seconds to wait on any single request (abstract-heavy pages are slow)
 _MAX_RETRIES = 3         # total attempts before giving up on a request
 _BASE_RETRY_DELAY = 2.0  # seconds; doubles each retry (exponential backoff)
 

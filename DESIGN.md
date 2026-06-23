@@ -98,12 +98,27 @@ For a long-lived deployment we'd add TTLs (§ Future directions).
 
 ---
 
-## 5. Ranking: lexical bag-of-words cosine — a deliberate floor
+## 5. Ranking: lexical relevance, amplified by citation impact
 
 **Decision.** `rank()` scores each paper by token-frequency **cosine similarity**, fused
-late as `0.8 × title + 0.2 × abstract`, falling back to title-only when no abstract exists.
+late as `relevance = 0.8 × title + 0.2 × abstract` (title-only when no abstract exists),
+then multiplies in a **citation-impact** term: `final = relevance × (1 + β × impact)`,
+where `impact = log1p(citations) / log1p(max_citations_in_pool)` and `β = 1.0`.
 
-**Why this is acceptable despite being simple.** The ranker is *re-ordering an
+**Why the impact term.** The candidate pool is dozens of near-identically-titled papers
+("… program comprehension"), so pure title cosine is almost a coin-flip among them — it
+floated 0–2-citation workshop notes above 100-citation seminal work. We already fetch
+`cited_by_count` (Crossref + OpenAlex) and were discarding it. Folding it in pulls the
+field's important papers to the top, which matters doubly because synthesis only reads the
+top slice (§3, §8) — better top-K, better review.
+
+**Why multiplicative, not additive.** A weighted *sum* (`α·relevance + (1−α)·citations`)
+would surface a famous-but-off-topic paper whose citations outweigh its low relevance.
+Multiplying keeps relevance as a **gate**: a paper that doesn't match scores ~0 no matter
+how cited it is. Citations only ever *reorder papers that already match*. The `log1p` plus
+pool-relative normalisation stops one mega-cited outlier from flattening everyone else.
+
+**Why lexical cosine for relevance despite being simple.** The ranker is *re-ordering an
 already-relevance-filtered set*, not doing primary retrieval — Crossref returns candidates
 by relevance, and query-understanding (§6) has already mapped the query into the terms the
 papers use. A weak ranker nudging a good candidate list is very different from a weak ranker
@@ -120,6 +135,12 @@ match *"program understanding"* to *"program comprehension."* This is mitigated 
 query-understanding canonicalizing terminology, but not eliminated. Scores therefore look
 modest (≈0.15–0.35), which is expected, not a bug.
 
+**Caveat — recency bias.** Citations accrue with age, so the impact term tilts toward
+older work. For survey/theory queries that's usually desirable (seminal papers *should*
+lead); for a "latest advances" query it can bury fresh work. `β` is the dial — lower it, or
+make it intent-aware (§6), if recency matters more than canon. Papers with no citation data
+(`cited_by_count = None`) are treated as 0 impact, i.e. ranked on relevance alone.
+
 **Status.** Good enough as a default; the clearest upgrade lever in the codebase (§ Future
 directions → semantic ranking).
 
@@ -127,33 +148,51 @@ directions → semantic ranking).
 
 ## 6. Query understanding: translate lay → academic terminology
 
-**Decision.** An LLM step rewrites the user's natural-language question into the canonical
-phrase the literature uses (e.g. *"how well someone grasps an algorithm"* → *"program
-comprehension"*), extracts keywords, and classifies intent. The prompt explicitly forbids
-injecting methodological framing words ("metrics", "evaluation", "framework", "approach")
-unless the user asked for them.
+**Decision.** An LLM step rewrites the user's natural-language question into **two** search
+phrases at different breadths, plus keywords and an intent label:
+- `refined_query` — the bare canonical topic (*"program comprehension"*), for **recall**.
+  Still forbids methodological framing words ("metrics", "evaluation", "framework").
+- `focus_query` — a narrower phrase that **keeps** the user's specific angle, including the
+  qualifier words `refined_query` drops (*"assessing program comprehension"*), for
+  **precision**. `null` when the question is a plain topic with no narrowing facet.
 
-**Why.** Because ranking is lexical (§5), the single highest-leverage place to fix a
-conceptual query is *before* search — get the canonical tokens right and both Crossref's
-relevance and our cosine line up. The framing-word ban exists because the model used to drift
-"program comprehension" into "metrics for program comprehension," narrowing recall to a
-sub-topic the user never asked about.
+**Why two phrases.** The framing-word ban (added because the model used to drift "program
+comprehension" → "metrics for program comprehension" and over-narrow) turned out to *also*
+strip the legitimate substance of a faceted question — a user asking *what characteristics
+mean someone understood an algorithm* was reduced to the bare topic, so retrieval returned
+the whole program-comprehension universe and none of the assessment-specific work. Splitting
+into a broad phrase (keeps recall, keeps the ban) and a focused phrase (restores the facet)
+resolves the tension instead of trading one failure for the other. The two phrases feed the
+two-pass retrieval in §7.
 
-**Alternatives considered.** Sending the raw query straight to Crossref (worse recall on
-lay phrasing); pure keyword extraction without a canonical phrase (loses connective context,
-see §7).
+**Alternatives considered.** A single phrase at one breadth — always either too broad
+(irrelevant papers) or too narrow (lost recall); this was the original design and the source
+of the "intent destroyed" failure. Loosening the framing-word ban on `refined_query` itself —
+rejected, it reintroduces the over-narrowing the ban prevents.
 
 ---
 
-## 7. Search string: prefer the refined phrase over bare keywords
+## 7. Retrieval: two-pass (broad + focused), merged by DOI
 
-**Decision.** The string sent to Crossref's `query.bibliographic` is the refined phrase with
-only generic container words stripped — not a bag of isolated keywords.
+**Decision.** For a faceted query we issue **two** Crossref `query.bibliographic` searches —
+the broad `refined_query` (recall) and the narrower `focus_query` (precision, §6) — and union
+the results, deduped by DOI. The pooled candidates are enriched and ranked together; `--limit`
+is applied *after* ranking so the best of a richer pool survives. A plain-topic query (no
+`focus_query`) runs a single pass exactly as before. Each phrase still has only generic
+container words stripped, never reduced to a bag of isolated keywords.
 
-**Why.** Crossref ranks across *all* terms, so connective context matters:
-*"natural language **to** SQL"* retrieves far more precisely than the three bare tokens. We
-strip only noise/container words ("paper", "survey", "university") that describe a document
-rather than a topic. Keywords are a fallback when the phrase reduces to nothing.
+**Why.** A single bare-topic search returns the whole topic and buries the user's actual
+angle (§6); a single narrow search loses the seminal broad papers (the original "weak papers"
+complaint, §5). Running both and letting ranking arbitrate gets the on-intent *and* the
+canonical work. We keep phrases rather than keyword bags because Crossref ranks across *all*
+terms, so connective context matters: *"natural language **to** SQL"* retrieves far more
+precisely than the three bare tokens. Keywords remain a per-phrase fallback when a phrase
+reduces to nothing.
+
+**Status / caveats.** The focused pass costs one extra Crossref request and enriches a
+slightly larger pool — accepted, since precision on faceted queries was the whole point.
+Merge is first-occurrence-wins on DOI; metadata is identical across passes (both Crossref),
+so order doesn't matter — ranking re-sorts the union regardless.
 
 ---
 
