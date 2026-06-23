@@ -5,6 +5,8 @@
 # Tool runtime artifacts
 # enrichment_cache.json is the on-disk DOI enrichment cache.
 enrichment_cache.json
+# embedding_cache.json caches SBERT vectors by DOI.
+embedding_cache.json
 # Scraped reference docs (e.g. Cloudflare_docs_chunks/).
 *_docs_chunks/
 *_docs_chunks/*.md

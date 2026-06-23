@@ -15,6 +15,7 @@ from ranking import rank
 from result import build_result
 from retrieval import get_translator
 from search_query import build_search_query
+from semantic import semantic_scores
 from synthesis import Synthesizer, select_for_synthesis
 
 
@@ -51,12 +52,14 @@ class LiteratureReviewPipeline:
         api_key: str = OLLAMA_API_KEY,
         source: str = "crossref",
         enrich: bool = True,
+        semantic: bool = True,
     ):
         self._qu = QueryUnderstanding(model=model, host=ollama_host, api_key=api_key)
         self._translator = get_translator(source)
         self._synthesizer = Synthesizer(model=model, host=ollama_host, api_key=api_key)
         self._source = source
         self._enrich = enrich
+        self._semantic = semantic
         self.model = model
 
     def run_retrieval(
@@ -92,8 +95,14 @@ class LiteratureReviewPipeline:
             _log("[2c]  Enriching metadata (abstracts, OA links, citations)...")
             records = enrich_pre_rank(records)
 
-        _log("[3/4] Ranking by relevance (intent-aware)...")
-        ranked = rank(records, structured.refined_query, structured.keywords, original_query=query)
+        sem = None
+        if self._semantic:
+            _log("[3a]  Scoring semantic similarity (SBERT embeddings)...")
+            sem = semantic_scores(query or structured.refined_query, records)
+
+        _log("[3/4] Ranking by relevance (semantic + lexical, citation-aware)...")
+        ranked = rank(records, structured.refined_query, structured.keywords,
+                      original_query=query, semantic_scores=sem)
         # The two passes can union to more than the caller asked for; keep the best `limit`
         # after ranking so a richer, more on-intent pool still honours --limit.
         if limit is not None:

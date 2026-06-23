@@ -94,6 +94,7 @@ def main() -> None:
         ollama_host=args.ollama_host,
         source=args.source,
         enrich=not args.no_enrich,
+        semantic=not args.no_semantic,
     )
 
     if args.output_json:

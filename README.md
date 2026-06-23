@@ -35,7 +35,8 @@ query
   → [2] retrieval             (Crossref REST API, two-pass broad+focused → merged CSLRecords)
   → [2b] processing           (schema normalization)
   → [2c] enrichment           (OpenAlex / Unpaywall fill abstracts, OA links, citations)
-  → [3] ranking               (relevance cosine × citation impact)
+  → [3a] semantic scoring      (SBERT embeddings; skipped with --no-semantic)
+  → [3] ranking               (0.8·semantic + 0.2·lexical, × citation impact)
   → [3b] TLDR enrichment       (Semantic Scholar, top-K only)
   → [4] synthesis             (LLM writes the review)
   → Markdown / JSON output
@@ -60,10 +61,13 @@ query
    - **Semantic Scholar** → one-line TLDR summaries for the top-ranked papers
    Results are cached on disk by DOI (`enrichment_cache.json`), so re-runs are fast.
    Disable the whole stage with `--no-enrich`.
-4. **Ranking** — scores papers by lexical relevance (`0.8 × title + 0.2 × abstract` cosine),
-   then amplifies by citation impact (`final = relevance × (1 + impact)`) so seminal work
-   rises and uncited notes sink — without ever surfacing an off-topic paper. Enrichment runs
-   *first* so the abstract term and citation counts are populated before scoring.
+4. **Ranking** — scores relevance as a hybrid of a **semantic** signal (SBERT embedding
+   cosine, `all-MiniLM-L6-v2`) and a **lexical** signal (`0.8 × title + 0.2 × abstract`
+   token cosine), blended `0.8 × semantic + 0.2 × lexical`, then amplified by citation impact
+   (`final = relevance × (1 + impact)`). Embeddings separate *"program comprehension"*
+   (software) from *"reading comprehension program"* (education) — token overlap can't.
+   Runs in-process via `sentence-transformers`, vectors cached by DOI; falls back to
+   lexical-only when the library is absent or `--no-semantic` is passed.
 5. **Synthesis** — the LLM writes a structured review over a bounded slice of the top
    papers (capped so the prompt can never exceed the model's context window).
 6. **Output** — writes a Markdown file and can also emit structured JSON.
@@ -94,6 +98,12 @@ pip install -r requirements.txt
 playwright install chromium   # only needed for the ACM fallback
 ```
 
+`requirements.txt` includes `sentence-transformers` (pulls PyTorch, ~200 MB) for the
+semantic ranking signal. The model (`all-MiniLM-L6-v2`, ~80 MB) downloads on first use and
+is cached. To skip all of this, drop that line and run with `--no-semantic` — the tool then
+ranks lexically with no extra dependency. An Intel XPU (Arc) or CUDA torch build is
+auto-detected for faster encoding; plain CPU is fine for the small batches we embed.
+
 ---
 
 ## Configuration
@@ -120,8 +130,8 @@ CONTACT_EMAIL=you@example.com
 
 ```
 python cli.py [-h] [--source {crossref,acm}] [--model MODEL] [--ollama-host URL]
-              [--limit N] [--no-synthesis] [--no-enrich] [--no-save]
-              [--out-dir DIR] [--workers N] [--json]
+              [--limit N] [--no-synthesis] [--no-enrich] [--no-semantic]
+              [--no-save] [--out-dir DIR] [--workers N] [--json]
               query
 ```
 
@@ -134,6 +144,7 @@ python cli.py [-h] [--source {crossref,acm}] [--model MODEL] [--ollama-host URL]
 | `--limit N` | Max papers to retrieve (default: 50; use `0` for no limit). Crossref returns by relevance, so the first ~50 carry the signal. |
 | `--no-synthesis` | Skip LLM synthesis; only show the ranked paper list |
 | `--no-enrich` | Skip metadata enrichment (abstracts/OA/TLDR); faster, offline-friendly |
+| `--no-semantic` | Skip SBERT embedding ranking; use lexical scoring only (deterministic, no model load) |
 | `--no-save` | Do not write a Markdown file to disk |
 | `--out-dir DIR` | Directory for the output `.md` file (default: current directory) |
 | `--workers N` | Concurrent page fetches; **only used by `--source acm`** (default: 4) |
@@ -241,7 +252,8 @@ lr_tool/
 │   ├── semantic_scholar.py #        TLDR summaries (batched)
 │   └── stages.py           #        public entry points: enrich_pre_rank, enrich_tldr
 │
-├── ranking.py              # [3]  relevance (cosine) × citation-impact ranking
+├── ranking.py              # [3]  hybrid (semantic + lexical) × citation-impact ranking
+├── semantic.py             #   └─ SBERT embeddings + DOI-cached vectors (semantic signal)
 ├── synthesis.py            # [4]  LLM review generation + synthesis-set selection
 ├── urls.py                 #      is.gd URL shortening (used by output)
 └── output.py               #      Markdown file generation
@@ -338,10 +350,11 @@ fields, uses a `*_checked` negative-cache marker, and never raises. Then call it
 
 ## Known limitations
 
-- **Relevance is lexical** (token cosine), so synonyms aren't matched directly; the
-  query-understanding step mitigates this by translating to canonical terms first. Citation
-  impact then amplifies the relevance score, which also tilts ranking toward older (more-cited)
-  work — see [`DESIGN.md` §5](DESIGN.md) for the recency caveat, the `β` dial, and how to upgrade it
+- **Ranking is a semantic+lexical hybrid.** The SBERT term handles synonyms/paraphrase and
+  cross-domain disambiguation; the lexical term is the deterministic, offline fallback (used
+  when `sentence-transformers` is absent or `--no-semantic` is passed). Citation impact then
+  amplifies relevance, which tilts ranking toward older (more-cited) work — see
+  [`DESIGN.md` §5](DESIGN.md) for the recency caveat, the blend/`β` dials, and next steps
   (dense embeddings via the Ollama endpoint you already have).
 - **Abstracts depend on OpenAlex** coverage; a paper absent from OpenAlex may stay
   abstract-less (it then contributes only its title score to ranking).

@@ -42,4 +42,5 @@ class RankedRecord(BaseModel):
     record: CSLRecord
     title_score: float = 0.0
     abstract_score: float = 0.0
+    semantic_score: float = 0.0     # embedding cosine; 0.0 when semantic ranking is off
     final_score: float = 0.0

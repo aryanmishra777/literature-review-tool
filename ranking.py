@@ -11,6 +11,13 @@ from models import CSLRecord, RankedRecord
 # the pool roughly double its score over an equally-relevant but uncited peer.
 _IMPACT_WEIGHT = 1.0
 
+# Weight on the semantic (embedding) score when it's available; lexical cosine takes the
+# rest. So meaning leads, but an exact phrase match still counts. Semantic ranking is what
+# separates "program comprehension" (software) from "reading comprehension program"
+# (education) — token overlap can't, dense vectors can. Falls back to pure lexical when
+# embeddings are unavailable (see semantic.py).
+_SEMANTIC_WEIGHT = 0.8
+
 
 def _tokenize(text: str) -> list[str]:
     return re.findall(r"\b\w+\b", text.lower())
@@ -45,19 +52,22 @@ def rank(
     refined_query: str,
     keywords: list[str],
     original_query: str = "",
+    semantic_scores: dict[str, float] | None = None,
 ) -> list[RankedRecord]:
-    """Rank papers by lexical relevance, then amplify by citation impact.
+    """Rank papers by relevance (semantic + lexical), then amplify by citation impact.
 
-    relevance   = 0.8 * title_cosine + 0.2 * abstract_cosine  (title-only if no abstract)
+    lexical     = 0.8 * title_cosine + 0.2 * abstract_cosine  (title-only if no abstract)
+    relevance   = 0.8 * semantic + 0.2 * lexical   (lexical-only when no embeddings)
     final_score = relevance * (1 + β * impact)
 
-    Query vector = refined query tokens + extracted keywords + original query tokens.
-    The original query restores intent words ("taught", "universities") that are
-    stripped from the bibliographic search string but still matter for ranking.
+    ``semantic_scores`` maps ``record.id`` → embedding cosine (see semantic.py); pass
+    None to rank on lexical signal alone (deterministic, offline). Lexical query vector =
+    refined query tokens + extracted keywords + original query tokens; the original query
+    restores intent words stripped from the bibliographic search string.
 
-    The impact term breaks the ties that pure title cosine leaves all over a pool of
-    near-identically-titled papers, pulling the field's seminal work up and burying
-    uncited minor notes — without ever surfacing a famous paper that doesn't match.
+    The impact term breaks the ties relevance leaves across a pool of near-identically
+    titled papers, pulling the field's seminal work up and burying uncited minor notes —
+    without ever surfacing a paper that doesn't match.
     """
     query_tokens = _tokenize(refined_query) + [kw.lower() for kw in keywords]
     if original_query:
@@ -73,10 +83,17 @@ def rank(
 
         if rec.abstract and not rec.metadata_missingness.abstract_missing:
             abstract_score = _cosine(q_tf, Counter(_tokenize(rec.abstract)))
-            relevance = 0.8 * title_score + 0.2 * abstract_score
+            lexical = 0.8 * title_score + 0.2 * abstract_score
         else:
             abstract_score = 0.0
-            relevance = title_score
+            lexical = title_score
+
+        if semantic_scores is not None:
+            semantic = semantic_scores.get(rec.id, 0.0)
+            relevance = _SEMANTIC_WEIGHT * semantic + (1 - _SEMANTIC_WEIGHT) * lexical
+        else:
+            semantic = 0.0
+            relevance = lexical
 
         final_score = relevance * (1 + _IMPACT_WEIGHT * _impact(rec.cited_by_count, max_log))
 
@@ -84,6 +101,7 @@ def rank(
             record=rec,
             title_score=title_score,
             abstract_score=abstract_score,
+            semantic_score=semantic,
             final_score=final_score,
         ))
 

@@ -5,3 +5,6 @@ beautifulsoup4>=4.12
 lxml>=5.0
 playwright>=1.44
 playwright-stealth>=1.0
+# Optional: enables semantic (embedding) ranking. Pulls torch as a dependency.
+# Omit it (or run with --no-semantic) to stay on the lexical-only ranker.
+sentence-transformers>=2.2

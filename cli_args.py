@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip metadata enrichment (abstracts/OA/TLDR); faster, offline-friendly",
     )
     parser.add_argument(
+        "--no-semantic",
+        action="store_true",
+        help="Skip SBERT embedding ranking and use lexical scoring only "
+             "(deterministic, no model load)",
+    )
+    parser.add_argument(
         "--no-save",
         action="store_true",
         help="Do not write the output Markdown file to disk",

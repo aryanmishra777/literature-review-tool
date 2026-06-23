@@ -98,12 +98,29 @@ For a long-lived deployment we'd add TTLs (§ Future directions).
 
 ---
 
-## 5. Ranking: lexical relevance, amplified by citation impact
+## 5. Ranking: semantic + lexical relevance, amplified by citation impact
 
-**Decision.** `rank()` scores each paper by token-frequency **cosine similarity**, fused
-late as `relevance = 0.8 × title + 0.2 × abstract` (title-only when no abstract exists),
-then multiplies in a **citation-impact** term: `final = relevance × (1 + β × impact)`,
-where `impact = log1p(citations) / log1p(max_citations_in_pool)` and `β = 1.0`.
+**Decision.** `rank()` scores relevance as a hybrid of a **semantic** and a **lexical**
+signal, then multiplies in a **citation-impact** term:
+
+```
+lexical    = 0.8 × title_cosine + 0.2 × abstract_cosine    (token-frequency; title-only if no abstract)
+semantic   = cosine(SBERT(query), SBERT(title+abstract))   (dense embeddings; see semantic.py)
+relevance  = 0.8 × semantic + 0.2 × lexical                (lexical-only when embeddings unavailable)
+final      = relevance × (1 + β × impact),  impact = log1p(citations) / log1p(max_in_pool),  β = 1.0
+```
+
+The semantic term uses Sentence-BERT (`all-MiniLM-L6-v2`) via `sentence-transformers`,
+run in-process (no server) with vectors cached on disk by DOI. It degrades gracefully:
+no `sentence-transformers`, or `--no-semantic`, falls back to the lexical-only path.
+
+**Why semantic.** Token overlap can't tell *"program comprehension"* (software) from
+*"reading comprehension program"* (education) or *"democratic peace research program"*
+(poli-sci) — they share the tokens `{program, comprehension}`, so a broad query dragged
+cross-domain noise into the top results. Dense embeddings place those in different regions
+of vector space (measured: real SE-comprehension titles score ≈0.4–0.5 against the query;
+the noise titles ≈0.01–0.18), so the noise sinks. This also fixes the long-standing
+synonym blindness below (*"program understanding"* ≈ *"program comprehension"*).
 
 **Why the impact term.** The candidate pool is dozens of near-identically-titled papers
 ("… program comprehension"), so pure title cosine is almost a coin-flip among them — it
@@ -118,22 +135,17 @@ Multiplying keeps relevance as a **gate**: a paper that doesn't match scores ~0 
 how cited it is. Citations only ever *reorder papers that already match*. The `log1p` plus
 pool-relative normalisation stops one mega-cited outlier from flattening everyone else.
 
-**Why lexical cosine for relevance despite being simple.** The ranker is *re-ordering an
-already-relevance-filtered set*, not doing primary retrieval — Crossref returns candidates
-by relevance, and query-understanding (§6) has already mapped the query into the terms the
-papers use. A weak ranker nudging a good candidate list is very different from a weak ranker
-searching from scratch. In exchange we get something zero-dependency, instant, deterministic,
-and fully offline.
+**Why keep lexical at all.** It's the deterministic, zero-dependency, fully-offline floor:
+when `sentence-transformers` isn't installed, the model can't load, or the user passes
+`--no-semantic`, ranking still works (lexically) rather than failing. It also contributes
+the 0.2 term in the hybrid, so an exact phrase match still counts alongside meaning. We
+avoid TF-IDF/BM25 for that lexical term: both lean on document-frequency statistics (IDF),
+and our pool of short, topically-homogeneous titles (term frequency ≈ 1, no "rare vs common"
+signal) is exactly the shape where IDF is degenerate and wouldn't earn its keep.
 
-**Why not TF-IDF or BM25.** Both lean on corpus document-frequency statistics (IDF). Our
-candidate pool is ~50 short, topically-homogeneous **titles** where within-document term
-frequency is almost always 1 and "rare vs common term" carries no signal — IDF is degenerate
-on exactly this shape of data, so the added machinery wouldn't earn its keep.
-
-**Known limitation.** Pure lexical matching is blind to synonyms and morphology: it cannot
-match *"program understanding"* to *"program comprehension."* This is mitigated upstream by
-query-understanding canonicalizing terminology, but not eliminated. Scores therefore look
-modest (≈0.15–0.35), which is expected, not a bug.
+**Why blend, not replace.** Pure embedding similarity occasionally rates a topically-vague
+paper above an exact match. Keeping 0.2 lexical (and the citation gate) preserves a hard
+signal for literal phrase hits and a graceful-degradation path, at no real cost.
 
 **Caveat — recency bias.** Citations accrue with age, so the impact term tilts toward
 older work. For survey/theory queries that's usually desirable (seminal papers *should*
@@ -141,8 +153,15 @@ lead); for a "latest advances" query it can bury fresh work. `β` is the dial �
 make it intent-aware (§6), if recency matters more than canon. Papers with no citation data
 (`cited_by_count = None`) are treated as 0 impact, i.e. ranked on relevance alone.
 
-**Status.** Good enough as a default; the clearest upgrade lever in the codebase (§ Future
-directions → semantic ranking).
+**Caveat — embedding cost & determinism.** The first run encodes the pool (CPU is fine for
+short titles; vectors cache by DOI, so re-runs are instant). Embedding ranking is *not*
+bit-for-bit deterministic across hardware/model versions the way lexical is — `--no-semantic`
+is the escape hatch for reproducible/offline runs. SBERT runs on CPU by default; an Intel
+XPU / CUDA torch build is auto-detected (see `semantic._pick_device`).
+
+**Status.** Semantic hybrid is the default when `sentence-transformers` is present. Next
+levers: a cross-encoder re-rank of the top-K, or reciprocal-rank fusion instead of the
+weighted blend (§ Future directions).
 
 ---
 
@@ -239,15 +258,14 @@ parsing guards the null explicitly. If you touch date handling, preserve this in
 
 Roughly ordered by expected value-for-effort.
 
-1. **Semantic ranking (highest leverage).** Replace — or fuse with — the lexical cosine
-   using dense embeddings, which directly fixes the synonym/morphology blindness of §5.
-   Because the project already depends on Ollama, the embeddings endpoint
-   (`nomic-embed-text`, `mxbai-embed-large`, …) gives this with **no new Python dependency**.
-   Suggested shape: a `--rank {lexical,semantic,hybrid}` switch where `hybrid` does
-   reciprocal-rank fusion over both, keeping the deterministic offline lexical path as the
-   default/fallback. Only `ranking.py` changes; `RankedRecord` stays the same.
+1. **Semantic ranking — DONE (§5).** Implemented as an SBERT hybrid (`semantic.py`),
+   blended `0.8 semantic + 0.2 lexical`, with `--no-semantic` and a lexical fallback. We
+   chose `sentence-transformers` over Ollama embeddings because Ollama *cloud* (the configured
+   chat backend) serves chat models only — its embed endpoint 401s — so an in-process SBERT
+   avoids forcing a separate local Ollama daemon. Remaining refinements: reciprocal-rank
+   fusion instead of the fixed-weight blend; making the blend weight intent-aware.
 
-2. **Cross-encoder re-rank of the top-K.** After a first-pass rank, jointly score
+2. **Cross-encoder re-rank of the top-K.** After the first-pass hybrid rank, jointly score
    `(query, title+abstract)` with a small cross-encoder. Trivial cost at ≤50 docs, best
    relevance gains. Pairs naturally with (1).
 
