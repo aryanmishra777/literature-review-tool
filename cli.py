@@ -11,8 +11,8 @@ import sys
 from pathlib import Path
 
 from cli_args import TOP_K_DEFAULT, build_parser
-from cli_display import ask_top_k, print_ranked
-from config import OLLAMA_API_KEY
+from cli_display import ask_top_k, choose_interpretation, print_ranked
+from config import OLLAMA_HOST, provider_defaults
 from output import save_markdown
 from pipeline import LiteratureReviewPipeline
 
@@ -31,6 +31,8 @@ def _run_json(pipeline: LiteratureReviewPipeline, args, limit: int | None) -> No
             top_k=TOP_K_DEFAULT,
             skip_synthesis=args.no_synthesis,
             workers=args.workers,
+            min_relevance=args.min_relevance,
+            contrast=args.contrast,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -40,9 +42,14 @@ def _run_json(pipeline: LiteratureReviewPipeline, args, limit: int | None) -> No
 
 def _run_interactive(pipeline: LiteratureReviewPipeline, args, limit: int | None) -> None:
     """Interactive path: retrieve, show, prompt, synthesize, save."""
+    # Offer the disambiguation picker only when prompting is enabled AND there's a human
+    # at a TTY; --no-interactive or a piped/redirected stdin auto-picks the primary sense.
+    can_prompt = args.interactive and sys.stdin.isatty()
+    disambiguate = choose_interpretation if can_prompt else None
     try:
         structured, records, ranked = pipeline.run_retrieval(
-            query=args.query, limit=limit, workers=args.workers
+            query=args.query, limit=limit, workers=args.workers,
+            disambiguate=disambiguate, min_relevance=args.min_relevance, contrast=args.contrast,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -59,7 +66,11 @@ def _run_interactive(pipeline: LiteratureReviewPipeline, args, limit: int | None
     if args.no_synthesis:
         top_k, review = TOP_K_DEFAULT, ""
     else:
-        top_k = ask_top_k(n_total=len(ranked), default=TOP_K_DEFAULT)
+        top_k = (
+            ask_top_k(n_total=len(ranked), default=TOP_K_DEFAULT)
+            if can_prompt
+            else min(TOP_K_DEFAULT, len(ranked))
+        )
         review = pipeline.synthesize(
             args.query, ranked, top_k=top_k, intent=sq.get("intent") or ""
         ) if ranked else ""
@@ -82,19 +93,31 @@ def main() -> None:
     args = build_parser().parse_args()
     limit = _normalize_limit(args.limit)
 
-    if not OLLAMA_API_KEY:
+    # Resolve provider settings: host/key/default-model come from the chosen provider,
+    # with --model and --ollama-host as optional overrides.
+    host, api_key, default_model = provider_defaults(args.provider)
+    if args.ollama_host and args.provider == "ollama":
+        host = args.ollama_host
+    args.model = args.model or default_model
+
+    if args.provider == "ollama" and not api_key:
         print(
             "Warning: OLLAMA_API_KEY not found in .env — "
-            "falling back to local Ollama at http://localhost:11434",
+            f"falling back to local Ollama at {OLLAMA_HOST}",
             file=sys.stderr,
         )
+    if args.provider == "groq" and not api_key:
+        print("Error: --provider groq requires GROQ_API_KEY in .env", file=sys.stderr)
+        sys.exit(1)
 
     pipeline = LiteratureReviewPipeline(
         model=args.model,
-        ollama_host=args.ollama_host,
+        host=host,
+        api_key=api_key,
         source=args.source,
         enrich=not args.no_enrich,
         semantic=not args.no_semantic,
+        provider=args.provider,
     )
 
     if args.output_json:

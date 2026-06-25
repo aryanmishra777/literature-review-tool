@@ -1,7 +1,7 @@
 """Argument parser definition for the CLI, kept separate so ``cli.py`` stays focused."""
 import argparse
 
-from config import DEFAULT_MODEL, OLLAMA_HOST
+from config import DEFAULT_MODEL, GROQ_DEFAULT_MODEL, OLLAMA_HOST
 
 TOP_K_DEFAULT = 10
 
@@ -19,14 +19,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Paper source to search (default: crossref; acm is a best-effort scraper fallback)",
     )
     parser.add_argument(
+        "--provider",
+        default="ollama",
+        choices=["ollama", "groq"],
+        help="LLM provider for query understanding and synthesis (default: ollama). "
+             "groq is cloud-only and needs GROQ_API_KEY in .env.",
+    )
+    parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
-        help=f"Ollama model for query understanding and synthesis (default: {DEFAULT_MODEL})",
+        default=None,
+        help="Model for query understanding and synthesis. Defaults per provider "
+             f"(ollama: {DEFAULT_MODEL}; groq: {GROQ_DEFAULT_MODEL}).",
     )
     parser.add_argument(
         "--ollama-host",
-        default=OLLAMA_HOST,
-        help=f"Ollama server URL (default: {OLLAMA_HOST})",
+        default=None,
+        help=f"Override the Ollama server URL (default: {OLLAMA_HOST}). Ignored for "
+             "--provider groq (Groq uses its fixed cloud endpoint).",
     )
     parser.add_argument(
         "--limit",
@@ -51,6 +60,34 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip SBERT embedding ranking and use lexical scoring only "
              "(deterministic, no model load)",
+    )
+    parser.add_argument(
+        "--min-relevance",
+        type=float,
+        default=0.25,
+        metavar="X",
+        help="Soft relevance floor: drop candidates scoring below X (0–1) before the "
+             "citation boost; trims off-topic tail noise. Default 0.25; use 0 to disable, "
+             "raise toward 0.30–0.35 for a tighter, higher-precision list.",
+    )
+    parser.add_argument(
+        "--contrast",
+        type=float,
+        default=0.4,
+        metavar="X",
+        help="Contrastive down-weighting: when you disambiguate, subtract X × similarity to "
+             "the rejected sense(s) so papers in the wrong sense sink. Only active when a "
+             "query was ambiguous and a sense was chosen. Default 0.4; 0 disables, raise "
+             "toward 0.5 for a stricter cut (at some cost to borderline-relevant recall).",
+    )
+    parser.add_argument(
+        "--interactive",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prompt during the run: pick a sense for ambiguous queries and choose how "
+             "many papers to synthesize. On by default; --no-interactive accepts defaults "
+             "without prompting (auto-pick the primary sense, default top-k). Always off "
+             "under --json, and prompts are skipped automatically when stdin isn't a TTY.",
     )
     parser.add_argument(
         "--no-save",

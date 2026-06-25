@@ -53,6 +53,7 @@ def rank(
     keywords: list[str],
     original_query: str = "",
     semantic_scores: dict[str, float] | None = None,
+    min_relevance: float = 0.0,
 ) -> list[RankedRecord]:
     """Rank papers by relevance (semantic + lexical), then amplify by citation impact.
 
@@ -64,6 +65,10 @@ def rank(
     None to rank on lexical signal alone (deterministic, offline). Lexical query vector =
     refined query tokens + extracted keywords + original query tokens; the original query
     restores intent words stripped from the bibliographic search string.
+
+    ``min_relevance`` is a soft floor: candidates whose *relevance* (before the citation
+    multiplier) falls below it are dropped entirely. Floored on relevance, not final_score,
+    so a heavily-cited but off-topic paper can't survive on its citations alone. 0.0 = off.
 
     The impact term breaks the ties relevance leaves across a pool of near-identically
     titled papers, pulling the field's seminal work up and burying uncited minor notes —
@@ -94,6 +99,9 @@ def rank(
         else:
             semantic = 0.0
             relevance = lexical
+
+        if relevance < min_relevance:
+            continue
 
         final_score = relevance * (1 + _IMPACT_WEIGHT * _impact(rec.cited_by_count, max_log))
 
