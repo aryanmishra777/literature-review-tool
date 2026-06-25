@@ -270,20 +270,28 @@ parsing guards the null explicitly. If you touch date handling, preserve this in
 
 ## 12. Disambiguation + sense-aware contrastive ranking
 
-**Decision.** When query understanding judges a query **ambiguous**, it returns a list of
-`interpretations` — distinct senses that would retrieve *different bodies of literature*. In
-an interactive run these become a pick-list (`cli_display.choose_interpretation`); the chosen
-sense then drives three things, not just one:
-1. **retrieval** — its discriminating `refined_query` / `focus_query` / `keywords` replace the
-   ambiguous defaults, narrowing the Crossref pool;
-2. **the semantic embedding** — the chosen sense is *appended* to the raw query before encoding
+**Decision.** When query understanding judges a query **ambiguous**, it enumerates a list of
+`interpretations` — distinct senses that would retrieve *different bodies of literature*. To
+make that enumeration reliable, the query-understanding call runs at a **modest temperature
+(0.3)**: listing the possible senses is a divergent task, and greedy temp-0 decoding commits to
+the single most-salient framing and under-lists alternatives — so a missed sense never becomes a
+contrastive negative. Temperature is kept low to protect the convergent fields (`refined_query`/
+`keywords`) in the same call.
+
+In an interactive run the interpretations become a pick-list (`cli_display.choose_interpretations`)
+and the user may pick **one or several** senses — related readings can be combined. Each chosen
+sense drives three things:
+1. **retrieval** — its discriminating `refined_query` / `focus_query` / `keywords` drive a search
+   pass; multiple chosen senses run a pass each and union their literatures (merged by DOI);
+2. **the semantic embedding** — the chosen sense(s) are *appended* to the raw query before encoding
    (augment, never replace), so the pick reaches the dominant 0.8 semantic signal;
-3. **contrastive down-weighting** — the senses the user *rejected* become negative anchors:
+3. **contrastive down-weighting** — the senses the user *did not* pick become negative anchors:
    `score = cos(doc, chosen) − contrast × max cos(doc, rejected)` (`semantic.py`), so papers in
-   the wrong sense sink and, via the relevance floor, can drop out entirely.
+   a rejected sense sink and, via the relevance floor, can drop out entirely.
 Non-interactive runs (`--json`, piped, `--no-interactive`) auto-pick the primary sense and log
-it. A separate **soft relevance floor** (`--min-relevance`, applied to relevance *before* the
-citation boost) trims the off-topic tail regardless of disambiguation.
+it; unparseable interactive input re-prompts rather than silently overriding the user. A separate
+**soft relevance floor** (`--min-relevance`, applied to relevance *before* the citation boost)
+trims the off-topic tail regardless of disambiguation.
 
 **Why.** Bag-of-words bibliographic search can't separate the two meanings of a term like
 *"algorithmic understanding"* — the computer-science sense (understanding how an algorithm

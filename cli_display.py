@@ -1,14 +1,18 @@
 """Terminal rendering + prompts for the interactive CLI flow."""
+import re
+
 from cli_args import TOP_K_DEFAULT
 from models import QueryInterpretation, StructuredQuery
 
 
-def choose_interpretation(structured: StructuredQuery) -> QueryInterpretation | None:
-    """Ask the user which sense of an ambiguous query to search.
+def choose_interpretations(structured: StructuredQuery) -> list[QueryInterpretation]:
+    """Ask the user which sense(s) of an ambiguous query to search.
 
-    Returns the chosen interpretation, or ``None`` to accept the model's primary guess
-    (the caller then falls back to it). A blank line, EOF (piped/no TTY), or out-of-range
-    input all select the first/primary sense. Only called when ≥2 interpretations exist.
+    Returns the chosen interpretations — one *or several*, since related senses can be
+    combined (their literatures are unioned and the rest become contrastive negatives).
+    Returns ``[]`` to accept the model's primary guess: a blank line or EOF (piped/no TTY)
+    does that. Unparseable or out-of-range input re-prompts rather than silently overriding
+    the user. Only called when ≥2 interpretations exist.
     """
     interps = structured.interpretations
     print("\nThis query is ambiguous — it could mean different things to a paper search:")
@@ -16,19 +20,25 @@ def choose_interpretation(structured: StructuredQuery) -> QueryInterpretation | 
         marker = "  (best guess)" if i == 1 else ""
         print(f"  {i}. {it.label}{marker}")
         print(f'       → searches: "{it.refined_query}"')
-    try:
-        raw = input(f"\nWhich sense did you mean? (1–{len(interps)}) [1]: ").strip()
-    except EOFError:
-        return None
-    if not raw:
-        return None
-    try:
-        idx = int(raw)
-    except ValueError:
-        return None
-    if 1 <= idx <= len(interps):
-        return interps[idx - 1]
-    return None
+    prompt = f"\nWhich sense(s) did you mean? (1–{len(interps)}, comma-separated for several) [1]: "
+    while True:
+        try:
+            raw = input(prompt).strip()
+        except EOFError:
+            return []
+        if not raw:
+            return []
+        parts = [p for p in re.split(r"[,\s]+", raw) if p]
+        if not all(p.isdigit() for p in parts):
+            print("  Please enter number(s) like 1 or 1,2.")
+            continue
+        idxs = [int(p) for p in parts]
+        if not all(1 <= i <= len(interps) for i in idxs):
+            print(f"  Pick number(s) between 1 and {len(interps)}.")
+            continue
+        # De-dupe, preserve the order the user typed.
+        seen: set[int] = set()
+        return [interps[i - 1] for i in idxs if not (i in seen or seen.add(i))]
 
 
 def print_ranked(ranked: list, cap: int | None = None) -> None:

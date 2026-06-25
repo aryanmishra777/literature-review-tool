@@ -5,16 +5,17 @@ CLI can run retrieval, show the ranked list, ask the user how many papers to syn
 and only then call the model. ``run`` is a convenience wrapper for non-interactive use.
 """
 import sys
-from typing import Callable, Optional
+from typing import Callable
 
 from config import DEFAULT_MODEL, OLLAMA_API_KEY, OLLAMA_HOST
 from enrichment import enrich_pre_rank, enrich_tldr
 from models import CSLRecord, QueryInterpretation, RankedRecord, StructuredQuery
 
-# A disambiguation hook: given an ambiguous StructuredQuery, return the interpretation the
-# user picked, or None to accept the model's primary guess. The CLI supplies one in
-# interactive runs; non-interactive callers pass nothing (auto-pick the first sense).
-DisambiguateFn = Callable[[StructuredQuery], Optional[QueryInterpretation]]
+# A disambiguation hook: given an ambiguous StructuredQuery, return the interpretation(s) the
+# user picked (one or several — senses can be combined), or an empty list to accept the
+# model's primary guess. The CLI supplies one in interactive runs; non-interactive callers
+# pass nothing (auto-pick the first sense).
+DisambiguateFn = Callable[[StructuredQuery], list[QueryInterpretation]]
 from processing import process_records
 from query_understanding import QueryUnderstanding
 from ranking import rank
@@ -79,40 +80,59 @@ class LiteratureReviewPipeline:
 
     def _resolve_interpretation(
         self, structured: StructuredQuery, disambiguate: DisambiguateFn | None
-    ) -> tuple[StructuredQuery, str | None, list[str]]:
-        """Pick a sense when the query is ambiguous, then redirect retrieval to it.
+    ) -> tuple[StructuredQuery, list[tuple[str, str | None, list[str]]], str | None, list[str]]:
+        """Pick one or more senses when the query is ambiguous, then steer retrieval to them.
 
-        Returns the (possibly redirected) query, a *positive hint* naming the chosen sense
-        (appended to the embedding text so the pick reaches the dominant semantic ranker),
-        and the *rejected* senses as text (negative anchors the ranker subtracts, so papers
-        hugging a wrong sense are pushed down). Hint is ``None`` / negatives empty when there
-        was nothing to disambiguate.
+        Returns four things:
+          • the (possibly redirected) query for display/lexical scoring,
+          • the **retrieval specs** — one ``(refined_query, focus_query, keywords)`` per chosen
+            sense, so each sense gets its own two-pass search (merged by DOI downstream),
+          • a *positive hint* (the chosen sense(s) flattened to text, appended to the embedding
+            so the pick reaches the dominant semantic ranker), or ``None``,
+          • the *rejected* senses as text (negative anchors the ranker subtracts).
 
-        With <2 interpretations there is nothing to resolve. Otherwise ask ``disambiguate``
-        (interactive runs); if it declines or there is no hook, fall back to the model's
-        primary guess (first interpretation) and log which sense was chosen plus the
-        alternatives, so an auto-pick is never silent.
+        With <2 interpretations there is nothing to resolve — one spec, no hint, no negatives.
+        Otherwise ask ``disambiguate``: the user may pick **several** senses (their literatures
+        are unioned; the rest become negatives). If it declines or there is no hook, fall back
+        to the model's primary guess and log it, so an auto-pick is never silent.
         """
         interps = structured.interpretations
         if len(interps) < 2:
-            return structured, None, []
+            spec = (structured.refined_query, structured.focus_query, structured.keywords)
+            return structured, [spec], None, []
 
-        chosen = disambiguate(structured) if disambiguate else None
-        if chosen is None:
-            chosen = interps[0]
+        chosen = (disambiguate(structured) if disambiguate else None) or []
+        if not chosen:
+            chosen = [interps[0]]
             _log('      note: query is ambiguous — auto-picked one sense (run interactively to choose):')
-            _log(f'            → {chosen.label}')
+            _log(f'            → {chosen[0].label}')
             for other in interps[1:]:
                 _log(f'              other sense: {other.label}')
+        elif len(chosen) > 1:
+            _log(f'      note: combining {len(chosen)} senses:')
+            for c in chosen:
+                _log(f'            + {c.label}')
+
+        # Union the chosen senses' keywords (order-preserving) for the lexical/display fields.
+        kw_seen: set[str] = set()
+        kw_union: list[str] = []
+        for c in chosen:
+            for k in c.keywords or []:
+                if k.lower() not in kw_seen:
+                    kw_seen.add(k.lower())
+                    kw_union.append(k)
+        kw_union = kw_union or structured.keywords
 
         redirected = structured.model_copy(update={
-            "refined_query": chosen.refined_query,
-            "focus_query": chosen.focus_query,
-            "keywords": chosen.keywords or structured.keywords,
+            "refined_query": chosen[0].refined_query,
+            "focus_query": chosen[0].focus_query,
+            "keywords": kw_union,
         })
-        hint = self._sense_text(chosen)
-        negatives = [self._sense_text(it) for it in interps if it is not chosen]
-        return redirected, hint, negatives
+        specs = [(c.refined_query, c.focus_query, c.keywords or kw_union) for c in chosen]
+        hint = ". ".join(self._sense_text(c) for c in chosen)
+        negatives = [self._sense_text(it) for it in interps
+                     if all(it is not c for c in chosen)]
+        return redirected, specs, hint, negatives
 
     def run_retrieval(
         self,
@@ -126,24 +146,27 @@ class LiteratureReviewPipeline:
         """Stages 1–3: understand → retrieve → (enrich) → rank. No LLM synthesis."""
         _log("[1/4] Understanding query...")
         structured = self._qu.transform(query)
-        structured, sem_hint, sem_negatives = self._resolve_interpretation(structured, disambiguate)
+        structured, specs, sem_hint, sem_negatives = self._resolve_interpretation(
+            structured, disambiguate)
         _log(f'      refined  : "{structured.refined_query}"')
         _log(f"      keywords : {structured.keywords}")
         _log(f"      intent   : {structured.intent}")
 
-        search = build_search_query(structured.refined_query, structured.keywords)
         shown_limit = limit if limit is not None else "unlimited"
         _log(f"[2/4] Retrieving from {self._source} (limit={shown_limit}, workers={workers})...")
-        _log(f'      search   : "{search}"  (broad / recall)')
-        raw_records = self._translator.search(search, limit=limit, workers=workers)
-
-        # Faceted queries get a second, narrower pass so the user's specific angle
-        # actually reaches Crossref instead of being flattened to the bare topic.
-        if structured.focus_query:
-            focus_search = build_search_query(structured.focus_query, structured.keywords)
-            _log(f'      focus    : "{focus_search}"  (focused / precision)')
-            focus_records = self._translator.search(focus_search, limit=limit, workers=workers)
-            raw_records = _merge_by_doi(focus_records, raw_records)
+        # One two-pass search (broad recall + focused precision) per chosen sense; the broad
+        # pass keeps the user's specific angle from being flattened, and multiple senses union
+        # their literatures. All passes merge by DOI — order is irrelevant (ranking re-sorts).
+        passes: list[list[CSLRecord]] = []
+        for refined, focus, kws in specs:
+            search = build_search_query(refined, kws)
+            _log(f'      search   : "{search}"  (broad / recall)')
+            passes.append(self._translator.search(search, limit=limit, workers=workers))
+            if focus:
+                focus_search = build_search_query(focus, kws)
+                _log(f'      focus    : "{focus_search}"  (focused / precision)')
+                passes.append(self._translator.search(focus_search, limit=limit, workers=workers))
+        raw_records = _merge_by_doi(*passes)
         _log(f"      fetched {len(raw_records)} unique records")
 
         _log("[2b]  Processing (schema enforcement)...")

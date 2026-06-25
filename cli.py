@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from cli_args import TOP_K_DEFAULT, build_parser
-from cli_display import ask_top_k, choose_interpretation, print_ranked
+from cli_display import ask_top_k, choose_interpretations, print_ranked
 from config import OLLAMA_HOST, provider_defaults
 from output import save_markdown
 from pipeline import LiteratureReviewPipeline
@@ -45,7 +45,7 @@ def _run_interactive(pipeline: LiteratureReviewPipeline, args, limit: int | None
     # Offer the disambiguation picker only when prompting is enabled AND there's a human
     # at a TTY; --no-interactive or a piped/redirected stdin auto-picks the primary sense.
     can_prompt = args.interactive and sys.stdin.isatty()
-    disambiguate = choose_interpretation if can_prompt else None
+    disambiguate = choose_interpretations if can_prompt else None
     try:
         structured, records, ranked = pipeline.run_retrieval(
             query=args.query, limit=limit, workers=args.workers,

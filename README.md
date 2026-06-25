@@ -32,7 +32,7 @@ python cli.py "what makes an algorithm easy to understand"
 ```
 query
   → [1] query understanding   (LLM: lay phrasing → broad + focused academic phrases)
-  → [1b] disambiguation        (if the query is ambiguous: pick a sense, interactive only)
+  → [1b] disambiguation        (if ambiguous: pick one or more senses, interactive only)
   → [2] retrieval             (Crossref REST API, two-pass broad+focused → merged CSLRecords)
   → [2b] processing           (schema normalization)
   → [2c] enrichment           (OpenAlex / Unpaywall fill abstracts, OA links, citations)
@@ -51,8 +51,10 @@ query
    term vs. its sociotechnical "in society" sense, say) — it also returns the distinct
    `interpretations`.
    - **Disambiguation** — in an interactive run, those interpretations become a pick-list:
-     you choose the sense you meant, and that choice redirects the search terms **and** the
-     semantic ranker (below). Non-interactive runs (`--json`, piped, or `--no-interactive`)
+     you choose the sense(s) you meant — **one or several**, since related senses can be
+     combined (e.g. `1, 2`). Chosen senses each drive a retrieval pass (their literatures are
+     unioned) and the embedding; the senses you *don't* pick become contrastive negatives the
+     ranker pushes away. Non-interactive runs (`--json`, piped, or `--no-interactive`)
      auto-pick the model's primary sense and log which one, so it's never a silent guess.
 2. **Retrieval** — queries the **Crossref** REST API, the canonical DOI metadata registry
    that publishers (ACM included) deposit to at publication time. No scraping, no anti-bot
@@ -193,9 +195,10 @@ python cli.py "vision transformers" --limit 50 --model llama3:8b
 # Use Groq instead of Ollama (needs GROQ_API_KEY); defaults to openai/gpt-oss-120b
 python cli.py "what makes an algorithm easy to understand" --provider groq
 
-# Ambiguous query: you'll be prompted to pick a sense, which steers retrieval + ranking
+# Ambiguous query: you'll be prompted to pick a sense (or several, e.g. "1, 2"),
+# which steers retrieval + ranking; unpicked senses are pushed away
 python cli.py "what does it mean to understand an algorithm"
-#   1. Computer-science education sense   2. Algorithms-in-society sense
+#   1. Students' comprehension of algorithms   2. Program comprehension   3. Algorithms in society
 
 # Looser cut (broader list, more borderline papers) vs tighter (high-precision)
 python cli.py "algorithmic understanding" --contrast 0.3 --min-relevance 0.20   # looser

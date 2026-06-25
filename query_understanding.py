@@ -4,6 +4,13 @@ from config import OLLAMA_API_KEY, OLLAMA_HOST, DEFAULT_MODEL
 from llm import make_client
 from models import StructuredQuery
 
+# Enumerating the possible *senses* of a query is a divergent/brainstorming task: greedy
+# (temp 0) decoding commits to the single most-salient framing and under-lists alternatives,
+# so a missed sense never becomes a contrastive negative. A modest temperature gives the
+# enumeration room to surface more senses. Kept low (not high) to protect the convergent
+# fields in the same call — refined_query/keywords feed a search engine and want precision.
+_TEMPERATURE = 0.3
+
 
 _SYSTEM = """\
 You are a query analysis assistant for an academic literature search tool.
@@ -48,18 +55,26 @@ Analyze this research query and return a JSON object with exactly these fields:
   would retrieve DIFFERENT BODIES OF LITERATURE from a bibliographic search. Populate this
   ONLY when the query is genuinely ambiguous; return an EMPTY list [] when it has a single
   clear reading. Do NOT pad with near-synonyms or sub-aspects of one topic — those are the
-  same sense, not separate interpretations.
-  A frequent and important split for computing/technical terms is the COMPUTATIONAL / formal
-  sense (the thing as a mathematical or computer-science object) vs. the SOCIOTECHNICAL sense
-  (the thing as a system embedded in society — management, governance, media, policy, fairness,
-  the arts). When such a split genuinely exists for the query, list each side as its own entry.
+  same sense, not separate interpretations. But DO list EVERY plausible distinct sense
+  (commonly two to four), not just the two most obvious — completeness matters, because the
+  senses you DON'T pick are used to steer the search AWAY from their literature.
+  For a computing/technical term, work through whether each of these distinct senses applies,
+  and list every one that genuinely does:
+    • COMPUTATIONAL / formal — the thing as a mathematical or computer-science object;
+    • LEARNING / cognitive — a learner's comprehension of that object;
+    • SOFTWARE-ENGINEERING — practitioners working with it (program comprehension, debugging);
+    • SOCIOTECHNICAL / critical — the thing as a system embedded in society (algorithmic
+      management, governance, bias, fairness, media, policy, the arts).
+  Even when the user clearly wants one of these, list the OTHERS that plausibly collide in
+  search results as separate interpretations, so retrieval can be pushed away from them.
   Each entry is an object with:
     - "label": a short description of that sense and the literature it targets.
     - "refined_query": the canonical search phrase for THAT sense. It MUST be discriminating —
-      a phrase that retrieves that sense and NOT the others. Do NOT reuse the bare ambiguous
-      term for any entry, and make the entries' refined_query values clearly distinct from
-      each other (anchor each in its field, e.g. add "in computer science education",
-      "in society", etc., so a search engine separates them).
+      a phrase that retrieves that sense and NOT the others. Center it on the ACTUAL SUBJECT
+      the user is asking about (e.g. "students' comprehension of algorithms"); do NOT use a
+      vague locative qualifier like "algorithmic understanding in education", which a search
+      engine reads as "algorithmic systems used IN education" and pulls the wrong literature.
+      Do NOT reuse the bare ambiguous term for any entry, and keep the entries clearly distinct.
     - "focus_query": the focused phrase for that sense, or null.
     - "keywords": the field terms SPECIFIC to that sense, distinct from the other entries'.
   The FIRST entry must be your single best guess and MUST match the top-level
@@ -88,7 +103,7 @@ class QueryUnderstanding:
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": _USER_TEMPLATE.format(query=query)},
             ],
-            options={"temperature": 0.0},
+            options={"temperature": _TEMPERATURE},
         )
         raw = response.message.content.strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
