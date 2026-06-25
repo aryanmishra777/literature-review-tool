@@ -348,6 +348,65 @@ can't survive on citations alone.
 
 ---
 
+## 13. Relevance tiering: label the output, don't filter it
+
+**Decision.** After ranking, a second LLM pass (`tiering.py`) labels each ranked paper with a
+relevance **tier** — `high` / `moderate` / `tangential` / `irrelevant` — judged against the
+research *goal*, not raw similarity. The tiers are **purely additive**: nothing is ever
+removed. They drive two things — a grouped *Relevance Tiers* section in the output (the
+score-ranked table is left intact), and the order synthesis fills its budget (highly-relevant
+papers first, stable within a tier, via `prioritize_by_tier`). On by default, including under
+`--no-synthesis`; `--no-tier` opts out.
+
+**Why label instead of filter.** This tool optimises for **recall** — the cost of dropping a
+relevant paper (a false negative) is far higher than carrying a few off-topic ones, because the
+synthesizer already ignores list noise. So a precision *filter* that deletes papers is the wrong
+shape: a misjudged title/abstract would silently remove a key result. A *labelling* layer gets
+the same legibility — the noise is visually quarantined at the bottom of the grouped section —
+without paying the recall cost, and it lets synthesis preferentially draw from the on-goal papers.
+The tier judgement adds signal the cosine score lacks: similarity can't tell that a heavily-cited
+paper sharing the query's vocabulary is actually from the wrong field, but an LLM reading the
+abstract against the goal can call it `irrelevant` while still leaving it in the list.
+
+**Why these four tiers.** Three graded "relevant" bands (high/moderate/tangential) plus a
+distinct `irrelevant` for genuine wrong-domain noise. The split between `tangential` (same domain,
+peripheral) and `irrelevant` (different field, keyword/retrieval noise) matters because they read
+very differently to a researcher scanning the list — peripheral-but-on-topic work is worth a
+glance; cross-domain noise is not. `intent` is fed to the classifier so, e.g., an
+`implementation` query treats purely theoretical/linguistic papers as moderate/tangential rather
+than high.
+
+**Why it's recall-safe in the details.** (1) The prompt tells the model to round *up* when
+genuinely unsure between two tiers. (2) A paper the model fails to classify at all defaults to
+`tangential`, not `irrelevant` — a non-classification shouldn't assert outright irrelevance, but
+it also shouldn't inherit a strong label it was never given. (3) Synthesis prioritisation only
+*re-orders within* the `top_k` the user already chose; it never pulls a paper from outside that
+slice, so the review can't cite a paper that isn't in the shown table. (4) A failed batch leaves
+its papers at the default rather than aborting — the pass degrades gracefully like every other
+networked stage (§10).
+
+**Why a default stage, even under `--no-synthesis`.** Query understanding (§6) already calls the
+LLM unconditionally, so `--no-synthesis` was never an "offline / no-LLM" switch — it means "don't
+write the prose review". Tiering sits alongside query understanding as a default LLM stage that
+shapes the *list* output, which is exactly what a `--no-synthesis` user is left with. A truly
+LLM-free run is `--no-synthesis --no-tier` (and `--no-enrich` to skip the enrichment APIs too).
+
+**Alternatives considered.**
+- *An LLM filter that deletes off-topic papers.* Rejected — the recall liability above; the user
+  explicitly wants breadth, and the synthesizer already tolerates list noise.
+- *Tiering only the synthesis input.* Considered; the grouped section over the *whole* shown list
+  is more useful (it tells you the shape of the retrieval), and it's the same LLM call either way.
+- *Reusing the cosine score to bucket (thresholds).* Rejected — the score measures similarity, not
+  goal-relevance; the wrong-field-but-high-similarity case (§5's cross-domain noise) is exactly
+  what a threshold can't catch but the LLM can.
+
+**Status / caveats.** Batched at 50 papers/call (low temperature for consistency); large lists
+cost a few calls. Tier quality is bounded by the model's judgement of the goal — same ceiling as
+query understanding. Like all LLM output it's mildly non-deterministic, so a borderline paper can
+shift one tier between identical runs.
+
+---
+
 ## Future directions
 
 Roughly ordered by expected value-for-effort.

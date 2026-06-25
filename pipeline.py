@@ -24,6 +24,7 @@ from retrieval import get_translator
 from search_query import build_search_query
 from semantic import semantic_scores
 from synthesis import Synthesizer, select_for_synthesis
+from tiering import TIER_SEQUENCE, Tierer, prioritize_by_tier
 
 
 def _log(msg: str) -> None:
@@ -60,14 +61,17 @@ class LiteratureReviewPipeline:
         source: str = "crossref",
         enrich: bool = True,
         semantic: bool = True,
+        tier: bool = True,
         provider: str = "ollama",
     ):
         self._qu = QueryUnderstanding(model=model, host=host, api_key=api_key, provider=provider)
         self._translator = get_translator(source)
         self._synthesizer = Synthesizer(model=model, host=host, api_key=api_key, provider=provider)
+        self._tierer = Tierer(model=model, host=host, api_key=api_key, provider=provider)
         self._source = source
         self._enrich = enrich
         self._semantic = semantic
+        self._tier = tier
         self.model = model
 
     @staticmethod
@@ -205,15 +209,37 @@ class LiteratureReviewPipeline:
             ranked = ranked[:limit]
         return structured, records, ranked
 
+    def tier_papers(
+        self, query: str, ranked: list[RankedRecord], intent: str = ""
+    ) -> list[RankedRecord]:
+        """Stage 3c: label each ranked paper high / moderate / tangential (LLM).
+
+        Additive only — sets ``.tier`` in place and returns the same list, untouched in
+        order. Skipped (a no-op) when tiering is disabled or there are no papers.
+        """
+        if not self._tier or not ranked:
+            return ranked
+        _log(f"[3c]  Tiering {len(ranked)} papers by relevance (LLM)...")
+        self._tierer.assign(query or "", ranked, intent=intent)
+        counts = {t: sum(1 for r in ranked if r.tier == t) for t in TIER_SEQUENCE}
+        _log(f"      tiers: {counts['high']} highly / {counts['moderate']} moderately / "
+             f"{counts['tangential']} tangentially relevant")
+        return ranked
+
     def synthesize(
         self, query: str, ranked: list[RankedRecord], top_k: int = 10, intent: str = ""
     ) -> str:
         """Stage 4: synthesize a review over a bounded slice of the ranked papers.
 
-        ``select_for_synthesis`` caps both the paper count and the prompt size, so the
-        request can never exceed the model's context window regardless of ``top_k``.
+        When papers have been tiered, the budget is filled from the highly-relevant ones
+        first (stable within a tier) — but only by re-ordering *within* the ``top_k`` papers
+        the user chose to act on, never by pulling in papers outside that slice (so the
+        review can't cite a paper that isn't in the shown list). ``select_for_synthesis``
+        caps both the paper count and the prompt size, so the request can never exceed the
+        model's context window regardless of ``top_k``.
         """
-        selected = select_for_synthesis(ranked, top_k)
+        pool = prioritize_by_tier(ranked[:top_k])
+        selected = select_for_synthesis(pool, top_k)
         k = len(selected)
         requested = min(top_k, len(ranked))
         if k < requested:
@@ -245,6 +271,10 @@ class LiteratureReviewPipeline:
             query, limit, workers=workers, disambiguate=disambiguate,
             min_relevance=min_relevance, contrast=contrast,
         )
+        # Tiering is a default stage in its own right (independent of synthesis): label the
+        # slice the result will expose — the same papers the table and grouped section show.
+        if ranked:
+            self.tier_papers(query, ranked[:top_k], intent=structured.intent or "")
         review = ""
         if not skip_synthesis and ranked:
             review = self.synthesize(query, ranked, top_k=top_k, intent=structured.intent or "")

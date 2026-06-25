@@ -9,6 +9,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from tiering import TIER_LABELS, TIER_SEQUENCE
 from urls import shorten_urls
 
 
@@ -43,6 +44,44 @@ def _paper_row(index: int, paper: dict, paper_url: str, doi_url: str, oa_url: st
     return f"| {index} | {title_cell} | {author_str} | {year} | {score} | {abstract_cell} | {doi_cell} | {oa_cell} |"
 
 
+def _tier_section(papers: list[dict], paper_urls: list[str]) -> list[str]:
+    """Group the ranked papers under relevance-tier headings (additive — keeps every paper).
+
+    The ranked table above stays in score order; this is a second view that buckets the same
+    papers into highly / moderately / tangentially relevant so the structure of the output is
+    visible at a glance. Each entry keeps its rank number to tie back to the table. Returns an
+    empty list (renders nothing) when the papers were not tiered.
+    """
+    if not any(p.get("tier") for p in papers):
+        return []
+
+    # Bucket by tier, preserving rank order (papers is already score-sorted). Carry the 1-based
+    # rank and the shortened title link so entries point back to the table row.
+    buckets: dict[str, list[str]] = {t: [] for t in TIER_SEQUENCE}
+    for rank, (paper, p_url) in enumerate(zip(papers, paper_urls), 1):
+        tier = paper.get("tier")
+        if tier not in buckets:
+            continue
+        title = _esc(paper["title"])
+        title_cell = f"[{title}]({p_url})" if p_url else title
+        authors = paper["authors"]
+        author_str = _esc(", ".join(authors[:2])) + (" et al." if len(authors) > 2 else "")
+        year = paper["year"] or "n.d."
+        meta = f" — {author_str} ({year})" if author_str else f" ({year})"
+        buckets[tier].append(f"- **#{rank}** {title_cell}{meta}")
+
+    lines = ["", "---", "", "## Relevance Tiers", "",
+             "_Every ranked paper above, grouped by how relevant the model judged it to the "
+             "research goal. Nothing is removed — this only labels the list; the review is "
+             "built from the highly-relevant papers first._", ""]
+    for tier in TIER_SEQUENCE:
+        rows = buckets[tier]
+        lines.append(f"### {TIER_LABELS[tier]} ({len(rows)})")
+        lines += rows or ["- _none_"]
+        lines.append("")
+    return lines
+
+
 def build_markdown(query, result, model, short_paper_urls, short_doi_urls, short_oa_urls) -> str:
     sq = result["structured_query"]
     papers = result["ranked"]
@@ -69,6 +108,8 @@ def build_markdown(query, result, model, short_paper_urls, short_doi_urls, short
         zip(papers, short_paper_urls, short_doi_urls, short_oa_urls), 1
     ):
         lines.append(_paper_row(i, paper, p_url, d_url, o_url))
+
+    lines += _tier_section(papers, short_paper_urls)
 
     if review:
         lines += ["", "---", "", "## Literature Review", "", review]

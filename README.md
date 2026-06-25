@@ -38,8 +38,9 @@ query
   → [2c] enrichment           (OpenAlex / Unpaywall fill abstracts, OA links, citations)
   → [3a] semantic scoring      (SBERT embeddings, contrastive on the chosen sense; --no-semantic skips)
   → [3] ranking               (0.8·semantic + 0.2·lexical, × citation impact, soft relevance floor)
+  → [3c] relevance tiering     (LLM labels each paper high → irrelevant; --no-tier skips)
   → [3b] TLDR enrichment       (Semantic Scholar, top-K only)
-  → [4] synthesis             (LLM writes the review)
+  → [4] synthesis             (LLM writes the review, highly-relevant papers first)
   → Markdown / JSON output
 ```
 
@@ -84,9 +85,17 @@ query
    - **Soft relevance floor** — candidates scoring below `--min-relevance` (on relevance,
      *before* the citation boost, so a heavily-cited off-topic paper can't survive on
      citations) are dropped, trimming off-topic tail noise. `0` disables it.
-5. **Synthesis** — the LLM writes a structured review over a bounded slice of the top
-   papers (capped so the prompt can never exceed the model's context window).
-6. **Output** — writes a Markdown file and can also emit structured JSON.
+5. **Relevance tiering** — a second LLM pass labels each ranked paper by how relevant it is
+   to your *goal* (not just keyword similarity): **highly / moderately / tangentially /
+   irrelevant**. This is purely additive — **nothing is removed**. It does two things: adds a
+   grouped *Relevance Tiers* section to the output (the score-ranked table is untouched), and
+   makes synthesis fill its budget from the highly-relevant papers first. A paper the model
+   skips falls to `tangential`; the model is told to round *up* when genuinely unsure, so the
+   bias is toward keeping. Runs by default (even with `--no-synthesis`); disable with `--no-tier`.
+6. **Synthesis** — the LLM writes a structured review over a bounded slice of the top
+   papers — highly-relevant first when tiered — capped so the prompt can never exceed the
+   model's context window.
+7. **Output** — writes a Markdown file and can also emit structured JSON.
 
 ---
 
@@ -150,7 +159,7 @@ CONTACT_EMAIL=you@example.com
 ```
 python cli.py [-h] [--source {crossref,acm}] [--provider {ollama,groq}] [--model MODEL]
               [--ollama-host URL] [--limit N] [--no-synthesis] [--no-enrich]
-              [--no-semantic] [--min-relevance X] [--contrast X]
+              [--no-semantic] [--no-tier] [--min-relevance X] [--contrast X]
               [--interactive | --no-interactive] [--no-save] [--out-dir DIR]
               [--workers N] [--json] query
 ```
@@ -163,9 +172,10 @@ python cli.py [-h] [--source {crossref,acm}] [--provider {ollama,groq}] [--model
 | `--model MODEL` | Model name. Defaults per provider (`ollama`: `gpt-oss:120b-cloud`; `groq`: `openai/gpt-oss-120b`) |
 | `--ollama-host URL` | Override the Ollama server URL (default: auto-detected from `.env`). Ignored for `--provider groq` |
 | `--limit N` | Max papers to retrieve (default: 50; use `0` for no limit). Crossref returns by relevance, so the first ~50 carry the signal. |
-| `--no-synthesis` | Skip LLM synthesis; only show the ranked paper list |
+| `--no-synthesis` | Skip the LLM review; only produce the ranked list (papers are still tiered unless `--no-tier`) |
 | `--no-enrich` | Skip metadata enrichment (abstracts/OA/TLDR); faster, offline-friendly |
 | `--no-semantic` | Skip SBERT embedding ranking; use lexical scoring only (deterministic, no model load) |
+| `--no-tier` | Skip the LLM relevance-tiering pass. By default each ranked paper is labelled highly / moderately / tangentially / irrelevant (adds a grouped section; synthesis draws from the highly-relevant first). Nothing is ever removed. |
 | `--min-relevance X` | Soft relevance floor — drop candidates below `X` (0–1) before the citation boost (default: `0.25`; `0` disables, raise toward `0.30–0.35` for a tighter list) |
 | `--contrast X` | Contrastive down-weighting vs the sense(s) you rejected when disambiguating (default: `0.4`; `0` disables, raise toward `0.5` to cut harder). Inert unless the query was ambiguous and a sense was chosen. |
 | `--interactive` / `--no-interactive` | Prompt for the ambiguous-sense pick and the synthesis count (default: **on**). `--no-interactive` accepts defaults silently; prompts are also auto-skipped when stdin isn't a TTY. |
@@ -186,8 +196,8 @@ python cli.py "transformer architectures survey" --no-synthesis
 # Non-interactive JSON (scripting / pipelines)
 python cli.py "graph neural networks" --json
 
-# Skip enrichment for a fast, offline-friendly run
-python cli.py "federated learning privacy" --no-enrich --no-synthesis
+# Skip enrichment + both LLM passes for a fast, offline-friendly run
+python cli.py "federated learning privacy" --no-enrich --no-synthesis --no-tier
 
 # Cap retrieval and pick a different model
 python cli.py "vision transformers" --limit 50 --model llama3:8b
@@ -218,7 +228,9 @@ python cli.py "algorithmic understanding" --no-interactive --no-synthesis
 
 **Interactive mode** prints the refined query, the ranked list (score, authors, year, DOI),
 and the generated review, then saves a Markdown file named after the query (skip with
-`--no-save`).
+`--no-save`). The saved file also carries a **Relevance Tiers** section — the same papers
+grouped under *Highly / Moderately / Tangentially / Irrelevant* (each keeping its `#rank`
+back-reference), unless `--no-tier` is set.
 
 **`--json` mode** prints one JSON object to stdout:
 
@@ -231,7 +243,7 @@ and the generated review, then saves a Markdown file named after the query (skip
       "title": "...", "authors": ["..."], "year": "2021", "venue": "...",
       "DOI": "...", "URL": "...", "oa_url": "...", "tldr": "...",
       "cited_by_count": 42, "score": 0.31, "title_score": 0.33,
-      "abstract_score": 0.22, "abstract_missing": false
+      "abstract_score": 0.22, "abstract_missing": false, "tier": "high"
     }
   ],
   "review": "..."
@@ -294,6 +306,7 @@ lr_tool/
 │
 ├── ranking.py              # [3]  hybrid (semantic + lexical) × citation-impact ranking
 ├── semantic.py             #   └─ SBERT embeddings + DOI-cached vectors (semantic signal)
+├── tiering.py              # [3c] LLM relevance tiering (high → irrelevant) + tier-priority order
 ├── synthesis.py            # [4]  LLM review generation + synthesis-set selection
 ├── urls.py                 #      is.gd URL shortening (used by output)
 └── output.py               #      Markdown file generation
@@ -319,7 +332,7 @@ Defined in `models.py` (Pydantic):
 | `Author` | `given` / `family` name parts |
 | `CSLRecord` | One paper, in a CSL-JSON-ish shape. The currency of the whole pipeline. |
 | `MetadataMissingness` | Flags (`abstract_missing`, `oa_missing`, `tldr_missing`) the ranker and output consult |
-| `RankedRecord` | A `CSLRecord` plus its `title_score` / `abstract_score` / `final_score` |
+| `RankedRecord` | A `CSLRecord` plus its `title_score` / `abstract_score` / `semantic_score` / `final_score`, and its relevance `tier` (high / moderate / tangential / irrelevant; `None` until tiering runs) |
 
 `CSLRecord.issued` is a **year string or `None`** — never the literal string `"None"`
 (see `crossref/parse.py:_parse_year`, which guards a Crossref edge case where the date is

@@ -62,18 +62,25 @@ def _run_interactive(pipeline: LiteratureReviewPipeline, args, limit: int | None
     print(f"Retrieved     : {len(records)} papers\n")
     print_ranked(ranked, cap=len(ranked))
 
-    # Decide how many papers to synthesize (skipped entirely with --no-synthesis).
+    # Decide how many papers to act on. --no-synthesis skips the review but NOT tiering —
+    # tiering is a default stage (like query understanding, it uses the LLM regardless).
     if args.no_synthesis:
-        top_k, review = TOP_K_DEFAULT, ""
+        top_k = TOP_K_DEFAULT
     else:
         top_k = (
             ask_top_k(n_total=len(ranked), default=TOP_K_DEFAULT)
             if can_prompt
             else min(TOP_K_DEFAULT, len(ranked))
         )
+    # Tier the slice the result will expose (labels the table/grouped section and lets
+    # synthesis draw from the highly-relevant papers first). No-op under --no-tier.
+    if ranked:
+        pipeline.tier_papers(args.query, ranked[:top_k], intent=sq.get("intent") or "")
+    review = ""
+    if not args.no_synthesis and ranked:
         review = pipeline.synthesize(
             args.query, ranked, top_k=top_k, intent=sq.get("intent") or ""
-        ) if ranked else ""
+        )
 
     if review:
         print("\n" + "=" * 72)
@@ -117,6 +124,7 @@ def main() -> None:
         source=args.source,
         enrich=not args.no_enrich,
         semantic=not args.no_semantic,
+        tier=not args.no_tier,
         provider=args.provider,
     )
 

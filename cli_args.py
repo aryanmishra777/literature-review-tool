@@ -48,7 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-synthesis",
         action="store_true",
-        help="Skip LLM synthesis and only show the ranked paper list",
+        help="Skip the LLM review and only produce the ranked paper list (papers are still "
+             "tiered unless --no-tier; add both for a fully synthesis-free, label-free run)",
     )
     parser.add_argument(
         "--no-enrich",
@@ -60,6 +61,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip SBERT embedding ranking and use lexical scoring only "
              "(deterministic, no model load)",
+    )
+    parser.add_argument(
+        "--no-tier",
+        action="store_true",
+        help="Skip the LLM relevance-tiering pass. By default each ranked paper is labelled "
+             "highly / moderately / tangentially relevant (a grouped section is added to the "
+             "output and synthesis draws from the highly-relevant papers first). Tiering runs "
+             "by default even with --no-synthesis. Nothing is ever removed — this only adds "
+             "labels.",
     )
     parser.add_argument(
         "--min-relevance",
