@@ -8,10 +8,17 @@ review. Everything runs from one command.
 python cli.py "what makes an algorithm easy to understand"
 ```
 
+📄 **See real outputs:** the [`examples/`](examples/) directory has unedited runs across four
+domains — [LLM hallucinations](examples/llm-hallucinations.md),
+[algorithm comprehension](examples/algorithm-comprehension.md),
+[human development](examples/human-development-life-course.md), and
+[legal compliance](examples/legal-compliance-checking.md).
+
 ---
 
 ## Table of contents
 
+- [Examples](examples/)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Installation](#installation)

@@ -12,10 +12,13 @@ embedding_cache.json
 *_docs_chunks/*.md
 
 # Generated literature reviews
-# Every run writes a <slug>.md; ignore them all but keep the docs we track.
+# Every run writes a <slug>.md; ignore them all but keep the docs we track
+# and the curated sample outputs under examples/.
 *.md
 !README.md
 !DESIGN.md
+!examples/
+!examples/**/*.md
 
 # Python
 __pycache__/
