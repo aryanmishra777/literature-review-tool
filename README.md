@@ -32,21 +32,31 @@ python cli.py "what makes an algorithm easy to understand"
 ```
 query
   → [1] query understanding   (LLM: lay phrasing → broad + focused academic phrases)
+  → [1b] disambiguation        (if ambiguous: pick one or more senses, interactive only)
   → [2] retrieval             (Crossref REST API, two-pass broad+focused → merged CSLRecords)
   → [2b] processing           (schema normalization)
   → [2c] enrichment           (OpenAlex / Unpaywall fill abstracts, OA links, citations)
-  → [3a] semantic scoring      (SBERT embeddings; skipped with --no-semantic)
-  → [3] ranking               (0.8·semantic + 0.2·lexical, × citation impact)
+  → [3a] semantic scoring      (SBERT embeddings, contrastive on the chosen sense; --no-semantic skips)
+  → [3] ranking               (0.8·semantic + 0.2·lexical, × citation impact, soft relevance floor)
+  → [3c] relevance tiering     (LLM labels each paper high → irrelevant; --no-tier skips)
   → [3b] TLDR enrichment       (Semantic Scholar, top-K only)
-  → [4] synthesis             (LLM writes the review)
+  → [4] synthesis             (LLM writes the review, highly-relevant papers first)
   → Markdown / JSON output
 ```
 
-1. **Query understanding** — an Ollama LLM rewrites your question into the canonical
-   terms scholarly papers actually use (e.g. *"how well someone grasps an algorithm"* →
-   *"program comprehension"*), extracts keywords, and classifies intent. For a faceted
-   question it also emits a narrower `focus_query` (e.g. *"assessing program comprehension"*)
-   that preserves the specific angle the broad term drops.
+1. **Query understanding** — an LLM rewrites your question into the canonical terms
+   scholarly papers actually use, extracts keywords, and classifies intent. For a faceted
+   question it also emits a narrower `focus_query` that preserves the specific angle the
+   broad term drops. When the query is genuinely **ambiguous** — i.e. a search would pull
+   different bodies of literature depending on the reading (the computer-science sense of a
+   term vs. its sociotechnical "in society" sense, say) — it also returns the distinct
+   `interpretations`.
+   - **Disambiguation** — in an interactive run, those interpretations become a pick-list:
+     you choose the sense(s) you meant — **one or several**, since related senses can be
+     combined (e.g. `1, 2`). Chosen senses each drive a retrieval pass (their literatures are
+     unioned) and the embedding; the senses you *don't* pick become contrastive negatives the
+     ranker pushes away. Non-interactive runs (`--json`, piped, or `--no-interactive`)
+     auto-pick the model's primary sense and log which one, so it's never a silent guess.
 2. **Retrieval** — queries the **Crossref** REST API, the canonical DOI metadata registry
    that publishers (ACM included) deposit to at publication time. No scraping, no anti-bot
    walls. Faceted queries run **two passes** — the broad topic (recall) and the focused
@@ -68,9 +78,24 @@ query
    (software) from *"reading comprehension program"* (education) — token overlap can't.
    Runs in-process via `sentence-transformers`, vectors cached by DOI; falls back to
    lexical-only when the library is absent or `--no-semantic` is passed.
-5. **Synthesis** — the LLM writes a structured review over a bounded slice of the top
-   papers (capped so the prompt can never exceed the model's context window).
-6. **Output** — writes a Markdown file and can also emit structured JSON.
+   - **Sense-aware scoring** — when you disambiguated, the embedding text is *augmented*
+     with your chosen sense, and the ranker is **contrastive**: it subtracts similarity to
+     the sense(s) you rejected (`score = cos(doc, chosen) − contrast × max cos(doc, rejected)`),
+     so papers in the wrong sense sink. Tune with `--contrast` (0 disables).
+   - **Soft relevance floor** — candidates scoring below `--min-relevance` (on relevance,
+     *before* the citation boost, so a heavily-cited off-topic paper can't survive on
+     citations) are dropped, trimming off-topic tail noise. `0` disables it.
+5. **Relevance tiering** — a second LLM pass labels each ranked paper by how relevant it is
+   to your *goal* (not just keyword similarity): **highly / moderately / tangentially /
+   irrelevant**. This is purely additive — **nothing is removed**. It does two things: adds a
+   grouped *Relevance Tiers* section to the output (the score-ranked table is untouched), and
+   makes synthesis fill its budget from the highly-relevant papers first. A paper the model
+   skips falls to `tangential`; the model is told to round *up* when genuinely unsure, so the
+   bias is toward keeping. Runs by default (even with `--no-synthesis`); disable with `--no-tier`.
+6. **Synthesis** — the LLM writes a structured review over a bounded slice of the top
+   papers — highly-relevant first when tiered — capped so the prompt can never exceed the
+   model's context window.
+7. **Output** — writes a Markdown file and can also emit structured JSON.
 
 ---
 
@@ -112,11 +137,14 @@ Create a `.env` file in the project root (it is gitignored):
 
 ```env
 OLLAMA_API_KEY=your_key_here
+GROQ_API_KEY=your_groq_key_here
 CONTACT_EMAIL=you@example.com
 ```
 
 - **`OLLAMA_API_KEY`** — if set, the tool talks to Ollama cloud (`https://ollama.com`).
   Without it, it falls back to a local Ollama at `http://localhost:11434`.
+- **`GROQ_API_KEY`** — required only when you run with `--provider groq` (Groq is cloud-only,
+  no local fallback). Get one at [console.groq.com](https://console.groq.com).
 - **`CONTACT_EMAIL`** — sent to the scholarly APIs as `mailto` (Crossref/OpenAlex) and
   `email` (Unpaywall). It opts you into their faster "polite pool" and is *required* by
   Unpaywall. Optional but recommended; a placeholder is used if unset.
@@ -129,22 +157,28 @@ CONTACT_EMAIL=you@example.com
 ## Usage
 
 ```
-python cli.py [-h] [--source {crossref,acm}] [--model MODEL] [--ollama-host URL]
-              [--limit N] [--no-synthesis] [--no-enrich] [--no-semantic]
-              [--no-save] [--out-dir DIR] [--workers N] [--json]
-              query
+python cli.py [-h] [--source {crossref,acm}] [--provider {ollama,groq}] [--model MODEL]
+              [--ollama-host URL] [--limit N] [--no-synthesis] [--no-enrich]
+              [--no-semantic] [--no-tier] [--min-relevance X] [--contrast X]
+              [--interactive | --no-interactive] [--no-save] [--out-dir DIR]
+              [--workers N] [--json] query
 ```
 
 | Argument | Description |
 |---|---|
 | `query` | Research query in natural language (required) |
 | `--source {crossref,acm}` | Paper source (default: `crossref`; `acm` is a best-effort scraper fallback) |
-| `--model MODEL` | Ollama model name (default: `gemma4:31b-cloud`) |
-| `--ollama-host URL` | Ollama server URL (default: auto-detected from `.env`) |
+| `--provider {ollama,groq}` | LLM backend (default: `ollama`). `groq` is cloud-only and needs `GROQ_API_KEY` in `.env` |
+| `--model MODEL` | Model name. Defaults per provider (`ollama`: `gpt-oss:120b-cloud`; `groq`: `openai/gpt-oss-120b`) |
+| `--ollama-host URL` | Override the Ollama server URL (default: auto-detected from `.env`). Ignored for `--provider groq` |
 | `--limit N` | Max papers to retrieve (default: 50; use `0` for no limit). Crossref returns by relevance, so the first ~50 carry the signal. |
-| `--no-synthesis` | Skip LLM synthesis; only show the ranked paper list |
+| `--no-synthesis` | Skip the LLM review; only produce the ranked list (papers are still tiered unless `--no-tier`) |
 | `--no-enrich` | Skip metadata enrichment (abstracts/OA/TLDR); faster, offline-friendly |
 | `--no-semantic` | Skip SBERT embedding ranking; use lexical scoring only (deterministic, no model load) |
+| `--no-tier` | Skip the LLM relevance-tiering pass. By default each ranked paper is labelled highly / moderately / tangentially / irrelevant (adds a grouped section; synthesis draws from the highly-relevant first). Nothing is ever removed. |
+| `--min-relevance X` | Soft relevance floor — drop candidates below `X` (0–1) before the citation boost (default: `0.25`; `0` disables, raise toward `0.30–0.35` for a tighter list) |
+| `--contrast X` | Contrastive down-weighting vs the sense(s) you rejected when disambiguating (default: `0.4`; `0` disables, raise toward `0.5` to cut harder). Inert unless the query was ambiguous and a sense was chosen. |
+| `--interactive` / `--no-interactive` | Prompt for the ambiguous-sense pick and the synthesis count (default: **on**). `--no-interactive` accepts defaults silently; prompts are also auto-skipped when stdin isn't a TTY. |
 | `--no-save` | Do not write a Markdown file to disk |
 | `--out-dir DIR` | Directory for the output `.md` file (default: current directory) |
 | `--workers N` | Concurrent page fetches; **only used by `--source acm`** (default: 4) |
@@ -162,11 +196,26 @@ python cli.py "transformer architectures survey" --no-synthesis
 # Non-interactive JSON (scripting / pipelines)
 python cli.py "graph neural networks" --json
 
-# Skip enrichment for a fast, offline-friendly run
-python cli.py "federated learning privacy" --no-enrich --no-synthesis
+# Skip enrichment + both LLM passes for a fast, offline-friendly run
+python cli.py "federated learning privacy" --no-enrich --no-synthesis --no-tier
 
 # Cap retrieval and pick a different model
 python cli.py "vision transformers" --limit 50 --model llama3:8b
+
+# Use Groq instead of Ollama (needs GROQ_API_KEY); defaults to openai/gpt-oss-120b
+python cli.py "what makes an algorithm easy to understand" --provider groq
+
+# Ambiguous query: you'll be prompted to pick a sense (or several, e.g. "1, 2"),
+# which steers retrieval + ranking; unpicked senses are pushed away
+python cli.py "what does it mean to understand an algorithm"
+#   1. Students' comprehension of algorithms   2. Program comprehension   3. Algorithms in society
+
+# Looser cut (broader list, more borderline papers) vs tighter (high-precision)
+python cli.py "algorithmic understanding" --contrast 0.3 --min-relevance 0.20   # looser
+python cli.py "algorithmic understanding" --contrast 0.5 --min-relevance 0.30   # tighter
+
+# Fully unattended (auto-pick the primary sense, no prompts)
+python cli.py "algorithmic understanding" --no-interactive --no-synthesis
 ```
 
 > **stdout vs stderr:** all progress logs go to **stderr**; only the review (interactive)
@@ -179,7 +228,9 @@ python cli.py "vision transformers" --limit 50 --model llama3:8b
 
 **Interactive mode** prints the refined query, the ranked list (score, authors, year, DOI),
 and the generated review, then saves a Markdown file named after the query (skip with
-`--no-save`).
+`--no-save`). The saved file also carries a **Relevance Tiers** section — the same papers
+grouped under *Highly / Moderately / Tangentially / Irrelevant* (each keeping its `#rank`
+back-reference), unless `--no-tier` is set.
 
 **`--json` mode** prints one JSON object to stdout:
 
@@ -192,7 +243,7 @@ and the generated review, then saves a Markdown file named after the query (skip
       "title": "...", "authors": ["..."], "year": "2021", "venue": "...",
       "DOI": "...", "URL": "...", "oa_url": "...", "tldr": "...",
       "cited_by_count": 42, "score": 0.31, "title_score": 0.33,
-      "abstract_score": 0.22, "abstract_missing": false
+      "abstract_score": 0.22, "abstract_missing": false, "tier": "high"
     }
   ],
   "review": "..."
@@ -218,13 +269,14 @@ lives in `pipeline.py`.
 lr_tool/
 ├── cli.py                  # Entry point: parse args, dispatch JSON vs interactive flow
 ├── cli_args.py             #   └─ argparse parser definition + TOP_K_DEFAULT
-├── cli_display.py          #   └─ terminal rendering (print_ranked) + the top-k prompt
+├── cli_display.py          #   └─ terminal rendering (print_ranked) + top-k & sense-pick prompts
 │
 ├── pipeline.py             # Orchestrates the stages (LiteratureReviewPipeline)
 ├── search_query.py         #   └─ build a Crossref search string from a query phrase
 ├── result.py               #   └─ assemble the final result dict (JSON/Markdown shape)
 │
-├── config.py               # Loads .env; exposes OLLAMA_*, DEFAULT_MODEL, CONTACT_EMAIL, USER_AGENT
+├── config.py               # Loads .env; exposes OLLAMA_*/GROQ_*, DEFAULT_MODEL, CONTACT_EMAIL, USER_AGENT
+├── llm.py                   #   └─ chat-client factory: one .chat() over Ollama or Groq
 ├── models.py               # Pydantic data models (CSLRecord, RankedRecord, …)
 ├── query_understanding.py  # [1]  LLM query refinement → StructuredQuery
 │
@@ -254,6 +306,7 @@ lr_tool/
 │
 ├── ranking.py              # [3]  hybrid (semantic + lexical) × citation-impact ranking
 ├── semantic.py             #   └─ SBERT embeddings + DOI-cached vectors (semantic signal)
+├── tiering.py              # [3c] LLM relevance tiering (high → irrelevant) + tier-priority order
 ├── synthesis.py            # [4]  LLM review generation + synthesis-set selection
 ├── urls.py                 #      is.gd URL shortening (used by output)
 └── output.py               #      Markdown file generation
@@ -274,11 +327,12 @@ Defined in `models.py` (Pydantic):
 
 | Model | Purpose |
 |---|---|
-| `StructuredQuery` | LLM output: `refined_query` (broad/recall), `focus_query` (narrow/precision, optional), `keywords`, `intent` |
+| `StructuredQuery` | LLM output: `refined_query` (broad/recall), `focus_query` (narrow/precision, optional), `keywords`, `intent`, and `interpretations` (distinct senses for disambiguation; empty when unambiguous) |
+| `QueryInterpretation` | One distinct sense of an ambiguous query: `label`, its own `refined_query` / `focus_query` / `keywords` |
 | `Author` | `given` / `family` name parts |
 | `CSLRecord` | One paper, in a CSL-JSON-ish shape. The currency of the whole pipeline. |
 | `MetadataMissingness` | Flags (`abstract_missing`, `oa_missing`, `tldr_missing`) the ranker and output consult |
-| `RankedRecord` | A `CSLRecord` plus its `title_score` / `abstract_score` / `final_score` |
+| `RankedRecord` | A `CSLRecord` plus its `title_score` / `abstract_score` / `semantic_score` / `final_score`, and its relevance `tier` (high / moderate / tangential / irrelevant; `None` until tiering runs) |
 
 `CSLRecord.issued` is a **year string or `None`** — never the literal string `"None"`
 (see `crossref/parse.py:_parse_year`, which guards a Crossref edge case where the date is

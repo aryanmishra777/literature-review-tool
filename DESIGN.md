@@ -159,9 +159,11 @@ bit-for-bit deterministic across hardware/model versions the way lexical is — 
 is the escape hatch for reproducible/offline runs. SBERT runs on CPU by default; an Intel
 XPU / CUDA torch build is auto-detected (see `semantic._pick_device`).
 
-**Status.** Semantic hybrid is the default when `sentence-transformers` is present. Next
-levers: a cross-encoder re-rank of the top-K, or reciprocal-rank fusion instead of the
-weighted blend (§ Future directions).
+**Status.** Semantic hybrid is the default when `sentence-transformers` is present. The
+semantic term also carries the **sense-aware** machinery — augmented embedding + contrastive
+down-weighting + the soft relevance floor — when a query was disambiguated (§12). Next levers:
+a cross-encoder re-rank of the top-K, or reciprocal-rank fusion instead of the weighted blend
+(§ Future directions).
 
 ---
 
@@ -251,6 +253,157 @@ parsing guards the null explicitly. If you touch date handling, preserve this in
   parsing vs orchestration), not arbitrary line counts. This is for readability and
   onboarding, and it's why `enrichment/`, `retrieval/crossref/`, and `retrieval/acm/` are
   packages rather than single files.
+
+---
+
+## 11. LLM provider: pluggable behind a one-method shim
+
+**Decision.** Query understanding and synthesis get their chat client from `llm.make_client(provider, host, api_key)`. Two providers ship: **ollama** (the official client, local or cloud) and **groq** (a thin `requests` wrapper over Groq's OpenAI-compatible `/chat/completions`). Both expose the identical `chat(model, messages, options)` → `response.message.content` shape the call sites already used, so neither `QueryUnderstanding` nor `Synthesizer` knows which backend is live.
+
+**Why.** The two LLM call sites had a duplicated `_make_client` and assumed the ollama response shape. Adding a second backend behind the *same* shape means the swap is a one-line constructor change in each, with zero branching in the prompt/parse logic. `config.provider_defaults(provider)` centralises the host/key/default-model triple so `--provider groq` "just works" without the user also passing `--model`/`--host`.
+
+**Why a `requests` shim, not the Groq SDK.** Groq's API is OpenAI-compatible, so a 30-line POST + response-adapter needs no new dependency (`requests` is already in-tree) and avoids pulling the `groq`/`openai` SDKs and their transitive deps for one endpoint. The shim mimics ollama's `.message.content` accessor rather than leaking `choices[0].message.content` upward, keeping the abstraction seam clean.
+
+**Caveats.** Groq is cloud-only — selecting it without `GROQ_API_KEY` is a hard error (no local fallback, unlike Ollama). Errors are normalised to `llm.ChatError`, which synthesis catches alongside `ollama.ResponseError`; the Groq branch surfaces the API's own error body (bad model id, rate limit, auth) verbatim. One gotcha baked in: a `requests.Response` with a 4xx/5xx status is *falsy*, so the error handler tests `is not None`, not truthiness, to read the status code.
+
+---
+
+## 12. Disambiguation + sense-aware contrastive ranking
+
+**Decision.** When query understanding judges a query **ambiguous**, it enumerates a list of
+`interpretations` — distinct senses that would retrieve *different bodies of literature*. To
+make that enumeration reliable, the query-understanding call runs at a **modest temperature
+(0.3)**: listing the possible senses is a divergent task, and greedy temp-0 decoding commits to
+the single most-salient framing and under-lists alternatives — so a missed sense never becomes a
+contrastive negative. Temperature is kept low to protect the convergent fields (`refined_query`/
+`keywords`) in the same call.
+
+In an interactive run the interpretations become a pick-list (`cli_display.choose_interpretations`)
+and the user may pick **one or several** senses — related readings can be combined. Each chosen
+sense drives three things:
+1. **retrieval** — its discriminating `refined_query` / `focus_query` / `keywords` drive a search
+   pass; multiple chosen senses run a pass each and union their literatures (merged by DOI);
+2. **the semantic embedding** — the chosen sense(s) are *appended* to the raw query before encoding
+   (augment, never replace), so the pick reaches the dominant 0.8 semantic signal;
+3. **contrastive down-weighting** — the senses the user *did not* pick become negative anchors:
+   `score = cos(doc, chosen) − contrast × max cos(doc, rejected)` (`semantic.py`), so papers in
+   a rejected sense sink and, via the relevance floor, can drop out entirely.
+Non-interactive runs (`--json`, piped, `--no-interactive`) auto-pick the primary sense and log
+it; unparseable interactive input re-prompts rather than silently overriding the user. A separate
+**soft relevance floor** (`--min-relevance`, applied to relevance *before* the citation boost)
+trims the off-topic tail regardless of disambiguation.
+
+**Why.** Bag-of-words bibliographic search can't separate the two meanings of a term like
+*"algorithmic understanding"* — the computer-science sense (understanding how an algorithm
+works) and the sociotechnical sense (algorithmic management / governance / media literacy)
+share the literal tokens, so retrieval returns the union and the social cluster floods the
+results. The earliest fix (just disambiguating the *search* terms) barely helped: the search
+and the 0.2 lexical score moved, but the **0.8 semantic** ranker still embedded the raw query,
+which is semantically a twin of every *"understanding algorithmic ‹X›"* title. Routing the pick
+into the embedding (augment) and actively pushing *away* from the rejected sense (contrast) is
+what finally sinks the wrong-sense papers.
+
+**Why augment, not replace, the embedding.** Replacing the raw query with the bare
+`refined_query` was tried and reverted — it discards the user's disambiguating anchors
+("characteristics", "well enough") and degraded the review. Augmenting keeps those anchors and
+*adds* a sense signal, and only when a sense was actually chosen; unambiguous queries embed the
+raw query unchanged.
+
+**Why contrastive (subtract the rejected sense), and why `max`.** A positive anchor alone
+raises the right papers but leaves wrong-sense papers in place when they're independently close
+to the raw query (e.g. *"Understanding of Algorithmic Decision-Making"*). Subtracting similarity
+to the rejected sense is what demotes them. We subtract the *closest* rejected sense (`max`, not
+mean) because one strong wrong-sense match is enough to disqualify a paper. Flooring on relevance
+*before* the citation multiplier (not on `final_score`) ensures a heavily-cited off-topic paper
+can't survive on citations alone.
+
+**Alternatives considered.**
+- *A hard relevance floor with no contrastive term.* Rejected as the primary lever: an
+  empirical sweep showed the society-noise papers score in the *same* 0.40–0.49 band as the
+  good papers, interleaved — a floor only trims the tail, it can't de-interleave. Kept as a
+  complementary, tunable trim (`--min-relevance`).
+- *Self-reported confidence scores from the LLM.* Rejected: confidence-on-correctness is poorly
+  calibrated. Ambiguity *detection* (enumerating distinct senses) is a different, reliable task,
+  so that's what the model is asked for instead.
+- *Always prompting.* Rejected: most queries are unambiguous; the model returns `[]` and the
+  pick-list never appears. Prompting is also gated on a TTY so scripts never hang.
+
+**Status / caveats.**
+- **Interpretation quality is the ceiling.** The model first mis-axed the senses (offered
+  "CS-ed vs AI/ML interpretability", missing the real *algorithms-in-society* axis); the prompt
+  now explicitly nudges the computational-vs-sociotechnical split and forbids reusing the bare
+  ambiguous term for any sense. If the model still fails to enumerate the noisy sense, the
+  contrastive term has nothing useful to subtract — the LLM step, not the ranker, is the limit.
+- **One rejected sense doesn't cover every noise family.** Subtracting *"algorithmic literacy"*
+  demotes literacy papers but not *decision-making / management / music* — a different family the
+  model didn't list. Those stubborn neighbours persist near the top; fully removing them needs
+  either a stricter cut (losing recall) or the model enumerating more rejected senses.
+- **Defaults are empirical, not magic.** `--contrast 0.4` / `--min-relevance 0.25` were chosen
+  from a `contrast × floor` sweep as the loosest setting that recovers borderline-relevant work
+  (the conceptual-vs-algorithmic / skill-vs-understanding cluster) while keeping the synthesis
+  top-K mostly clean. They are pool-sensitive (the LLM's `refined_query` varies run to run,
+  changing the score distribution), so they're exposed as flags to tune per query. A relative
+  floor (keep within Y of the top score) would be more robust than an absolute one — a candidate
+  for future work, alongside the evaluation harness that would let us *measure* these dials.
+
+---
+
+## 13. Relevance tiering: label the output, don't filter it
+
+**Decision.** After ranking, a second LLM pass (`tiering.py`) labels each ranked paper with a
+relevance **tier** — `high` / `moderate` / `tangential` / `irrelevant` — judged against the
+research *goal*, not raw similarity. The tiers are **purely additive**: nothing is ever
+removed. They drive two things — a grouped *Relevance Tiers* section in the output (the
+score-ranked table is left intact), and the order synthesis fills its budget (highly-relevant
+papers first, stable within a tier, via `prioritize_by_tier`). On by default, including under
+`--no-synthesis`; `--no-tier` opts out.
+
+**Why label instead of filter.** This tool optimises for **recall** — the cost of dropping a
+relevant paper (a false negative) is far higher than carrying a few off-topic ones, because the
+synthesizer already ignores list noise. So a precision *filter* that deletes papers is the wrong
+shape: a misjudged title/abstract would silently remove a key result. A *labelling* layer gets
+the same legibility — the noise is visually quarantined at the bottom of the grouped section —
+without paying the recall cost, and it lets synthesis preferentially draw from the on-goal papers.
+The tier judgement adds signal the cosine score lacks: similarity can't tell that a heavily-cited
+paper sharing the query's vocabulary is actually from the wrong field, but an LLM reading the
+abstract against the goal can call it `irrelevant` while still leaving it in the list.
+
+**Why these four tiers.** Three graded "relevant" bands (high/moderate/tangential) plus a
+distinct `irrelevant` for genuine wrong-domain noise. The split between `tangential` (same domain,
+peripheral) and `irrelevant` (different field, keyword/retrieval noise) matters because they read
+very differently to a researcher scanning the list — peripheral-but-on-topic work is worth a
+glance; cross-domain noise is not. `intent` is fed to the classifier so, e.g., an
+`implementation` query treats purely theoretical/linguistic papers as moderate/tangential rather
+than high.
+
+**Why it's recall-safe in the details.** (1) The prompt tells the model to round *up* when
+genuinely unsure between two tiers. (2) A paper the model fails to classify at all defaults to
+`tangential`, not `irrelevant` — a non-classification shouldn't assert outright irrelevance, but
+it also shouldn't inherit a strong label it was never given. (3) Synthesis prioritisation only
+*re-orders within* the `top_k` the user already chose; it never pulls a paper from outside that
+slice, so the review can't cite a paper that isn't in the shown table. (4) A failed batch leaves
+its papers at the default rather than aborting — the pass degrades gracefully like every other
+networked stage (§10).
+
+**Why a default stage, even under `--no-synthesis`.** Query understanding (§6) already calls the
+LLM unconditionally, so `--no-synthesis` was never an "offline / no-LLM" switch — it means "don't
+write the prose review". Tiering sits alongside query understanding as a default LLM stage that
+shapes the *list* output, which is exactly what a `--no-synthesis` user is left with. A truly
+LLM-free run is `--no-synthesis --no-tier` (and `--no-enrich` to skip the enrichment APIs too).
+
+**Alternatives considered.**
+- *An LLM filter that deletes off-topic papers.* Rejected — the recall liability above; the user
+  explicitly wants breadth, and the synthesizer already tolerates list noise.
+- *Tiering only the synthesis input.* Considered; the grouped section over the *whole* shown list
+  is more useful (it tells you the shape of the retrieval), and it's the same LLM call either way.
+- *Reusing the cosine score to bucket (thresholds).* Rejected — the score measures similarity, not
+  goal-relevance; the wrong-field-but-high-similarity case (§5's cross-domain noise) is exactly
+  what a threshold can't catch but the LLM can.
+
+**Status / caveats.** Batched at 50 papers/call (low temperature for consistency); large lists
+cost a few calls. Tier quality is bounded by the model's judgement of the goal — same ceiling as
+query understanding. Like all LLM output it's mildly non-deterministic, so a borderline paper can
+shift one tier between identical runs.
 
 ---
 

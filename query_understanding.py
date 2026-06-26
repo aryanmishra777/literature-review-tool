@@ -1,8 +1,15 @@
 import json
 import re
-import ollama
 from config import OLLAMA_API_KEY, OLLAMA_HOST, DEFAULT_MODEL
+from llm import make_client
 from models import StructuredQuery
+
+# Enumerating the possible *senses* of a query is a divergent/brainstorming task: greedy
+# (temp 0) decoding commits to the single most-salient framing and under-lists alternatives,
+# so a missed sense never becomes a contrastive negative. A modest temperature gives the
+# enumeration room to surface more senses. Kept low (not high) to protect the convergent
+# fields in the same call — refined_query/keywords feed a search engine and want precision.
+_TEMPERATURE = 0.3
 
 
 _SYSTEM = """\
@@ -12,17 +19,16 @@ scholarly papers use specific field terminology. Your job is to translate the
 user's question into the terminology the academic literature actually uses, so a
 bibliographic search engine can match the right papers.
 
-Map lay phrasing to the established academic term for the SAME concept, e.g.:
-  "making a computer understand what I type"      -> "natural language understanding"
-  "how well someone grasps an algorithm"          -> "program comprehension"
-  "teaching kids to code"                          -> "computing education / CS education"
-  "spotting fake reviews online"                   -> "fake review detection / opinion spam"
+Map the user's lay phrasing to the established academic term for the SAME concept.
+Choose the term that most faithfully names what the user is actually asking about;
+do NOT substitute a different but adjacent field just because it is well-known.
 
 You produce TWO search phrases at different breadths, because retrieval runs both:
   • a BROAD topic phrase for recall (the bare canonical term), and
   • a FOCUSED phrase for precision that keeps the SPECIFIC angle the user asked about.
-A faceted question like "what characteristics tell us someone understood an algorithm"
-is about *assessing* comprehension, not all of it — the focused phrase must preserve that.
+When the question targets one aspect of a topic (how to assess it, one method within it,
+one sub-population), the focused phrase must preserve that aspect, not collapse to the
+bare topic.
 
 Stay faithful to the user's intent. Do NOT drift to unrelated concepts or invent
 topics the user did not ask about. If the topic has no standard academic term,
@@ -37,28 +43,46 @@ Analyze this research query and return a JSON object with exactly these fields:
   framing words such as "metrics", "evaluation", "framework", "approach", "analysis",
   or "methods" unless the user explicitly asked for them. This string is sent
   directly to the search engine, so prefer canonical terms over the user's literal words.
-  (e.g. "how well someone grasps an algorithm" -> "program comprehension", NOT
-  "metrics for program comprehension".)
 - "focus_query": a more specific phrase capturing the user's PARTICULAR angle on the
   topic. Combine the canonical term with the specific aspect they asked about, and HERE
-  you DO keep the qualifier words refined_query drops (e.g. "how do we know someone
-  understood an algorithm well" -> "assessing program comprehension"; "what makes SQL
-  generation from text accurate" -> "text-to-SQL accuracy evaluation"). Set this to null
+  you DO keep the qualifier words refined_query drops. Set this to null
   when the query is a plain topic with no narrowing aspect (then refined_query alone is used).
 - "keywords": list of the canonical technical/field terms for the topic (the
   established academic terms — not just words copied verbatim from the query).
   Related sub-topics are fine here; keep them out of refined_query.
 - "intent": one of "survey", "implementation", "theory", or null (null if ambiguous).
+- "interpretations": a list of DISTINCT research senses the query could mean — senses that
+  would retrieve DIFFERENT BODIES OF LITERATURE from a bibliographic search. Populate this
+  ONLY when the query is genuinely ambiguous; return an EMPTY list [] when it has a single
+  clear reading. Do NOT pad with near-synonyms or sub-aspects of one topic — those are the
+  same sense, not separate interpretations. But DO list EVERY plausible distinct sense
+  (commonly two to four), not just the two most obvious — completeness matters, because the
+  senses you DON'T pick are used to steer the search AWAY from their literature.
+  For a computing/technical term, work through whether each of these distinct senses applies,
+  and list every one that genuinely does:
+    • COMPUTATIONAL / formal — the thing as a mathematical or computer-science object;
+    • LEARNING / cognitive — a learner's comprehension of that object;
+    • SOFTWARE-ENGINEERING — practitioners working with it (program comprehension, debugging);
+    • SOCIOTECHNICAL / critical — the thing as a system embedded in society (algorithmic
+      management, governance, bias, fairness, media, policy, the arts).
+  Even when the user clearly wants one of these, list the OTHERS that plausibly collide in
+  search results as separate interpretations, so retrieval can be pushed away from them.
+  Each entry is an object with:
+    - "label": a short description of that sense and the literature it targets.
+    - "refined_query": the canonical search phrase for THAT sense. It MUST be discriminating —
+      a phrase that retrieves that sense and NOT the others. Center it on the ACTUAL SUBJECT
+      the user is asking about (e.g. "students' comprehension of algorithms"); do NOT use a
+      vague locative qualifier like "algorithmic understanding in education", which a search
+      engine reads as "algorithmic systems used IN education" and pulls the wrong literature.
+      Do NOT reuse the bare ambiguous term for any entry, and keep the entries clearly distinct.
+    - "focus_query": the focused phrase for that sense, or null.
+    - "keywords": the field terms SPECIFIC to that sense, distinct from the other entries'.
+  The FIRST entry must be your single best guess and MUST match the top-level
+  refined_query / focus_query / keywords above (so the top-level fields are themselves
+  discriminating, never the bare ambiguous term).
 
 Query: {query}
 """
-
-
-def _make_client(host: str, api_key: str) -> ollama.Client:
-    kwargs: dict = {"host": host}
-    if api_key:
-        kwargs["headers"] = {"Authorization": f"Bearer {api_key}"}
-    return ollama.Client(**kwargs)
 
 
 class QueryUnderstanding:
@@ -67,8 +91,9 @@ class QueryUnderstanding:
         model: str = DEFAULT_MODEL,
         host: str = OLLAMA_HOST,
         api_key: str = OLLAMA_API_KEY,
+        provider: str = "ollama",
     ):
-        self._client = _make_client(host, api_key)
+        self._client = make_client(provider, host, api_key)
         self._model = model
 
     def transform(self, query: str) -> StructuredQuery:
@@ -78,7 +103,7 @@ class QueryUnderstanding:
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": _USER_TEMPLATE.format(query=query)},
             ],
-            options={"temperature": 0.0},
+            options={"temperature": _TEMPERATURE},
         )
         raw = response.message.content.strip()
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)

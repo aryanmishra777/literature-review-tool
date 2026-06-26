@@ -4,6 +4,7 @@ import sys
 import ollama
 
 from config import OLLAMA_API_KEY, OLLAMA_HOST, DEFAULT_MODEL
+from llm import ChatError, make_client
 from models import RankedRecord
 
 
@@ -71,21 +72,15 @@ def select_for_synthesis(ranked: list[RankedRecord], top_k: int) -> list[RankedR
     return selected
 
 
-def _make_client(host: str, api_key: str) -> ollama.Client:
-    kwargs: dict = {"host": host}
-    if api_key:
-        kwargs["headers"] = {"Authorization": f"Bearer {api_key}"}
-    return ollama.Client(**kwargs)
-
-
 class Synthesizer:
     def __init__(
         self,
         model: str = DEFAULT_MODEL,
         host: str = OLLAMA_HOST,
         api_key: str = OLLAMA_API_KEY,
+        provider: str = "ollama",
     ):
-        self._client = _make_client(host, api_key)
+        self._client = make_client(provider, host, api_key)
         self._model = model
 
     def synthesize(self, query: str, papers: list[RankedRecord], intent: str = "") -> str:
@@ -108,7 +103,7 @@ class Synthesizer:
                 ],
                 options={"temperature": 0.3},
             )
-        except ollama.ResponseError as exc:
+        except (ollama.ResponseError, ChatError) as exc:
             print(f"[synthesis] model error: {exc}", file=sys.stderr)
             return ""
         return response.message.content.strip()

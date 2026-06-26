@@ -98,11 +98,27 @@ def _dot(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
-def semantic_scores(query_text: str, records: list) -> dict[str, float] | None:
-    """Map each ``record.id`` to cosine(query, title+abstract), or None if unavailable.
+def semantic_scores(
+    query_text: str,
+    records: list,
+    negative_texts: list[str] | None = None,
+    penalty: float = 0.0,
+) -> dict[str, float] | None:
+    """Map each ``record.id`` to a semantic relevance score, or None if unavailable.
 
-    Cached doc vectors are reused; only cache misses are encoded. Any encode failure
-    returns None so the caller cleanly falls back to deterministic lexical ranking.
+    Base score is cosine(query, title+abstract). When ``negative_texts`` is given (the
+    senses the user *rejected* during disambiguation) and ``penalty`` > 0, the score becomes
+    *contrastive*::
+
+        score = cos(doc, query) - penalty * max_n cos(doc, negative_n)
+
+    i.e. a paper that hugs a rejected sense (the "algorithms in society" cluster, say) is
+    pushed down — and, via the relevance floor, can drop out entirely. Subtracting the
+    *closest* rejected sense (max) is deliberate: one strong wrong-sense match is enough.
+
+    Cached doc vectors are reused; only cache misses are encoded. Any encode failure returns
+    None so the caller cleanly falls back to deterministic lexical ranking. If the negatives
+    fail to encode, we degrade to the plain positive score rather than dropping semantics.
     """
     cache = _load_cache()
     key = lambda rec: f"{MODEL_NAME}:{rec.DOI or rec.id}"
@@ -119,6 +135,21 @@ def semantic_scores(query_text: str, records: list) -> dict[str, float] | None:
     query_vec = _encode([query_text])
     if not query_vec:
         return None
-
     qv = query_vec[0]
-    return {r.id: _dot(qv, cache[key(r)]) for r in records if key(r) in cache}
+
+    neg_vecs: list[list[float]] = []
+    if negative_texts and penalty > 0:
+        encoded = _encode(negative_texts)
+        if encoded:  # degrade to positive-only if the negatives can't be encoded
+            neg_vecs = encoded
+
+    scores: dict[str, float] = {}
+    for r in records:
+        if key(r) not in cache:
+            continue
+        dv = cache[key(r)]
+        score = _dot(qv, dv)
+        if neg_vecs:
+            score -= penalty * max(_dot(nv, dv) for nv in neg_vecs)
+        scores[r.id] = score
+    return scores
