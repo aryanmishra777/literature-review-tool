@@ -4,9 +4,20 @@ Give it a natural-language research question; get back a ranked list of papers (
 abstracts, open-access links, and citation counts) plus an AI-generated literature
 review. Everything runs from one command.
 
+It's an **open, self-hostable, recall-first** take on scholarly discovery: it runs on your
+own machine and keys, shows you *every* paper it considered and the score behind it, and
+hands back a **cited first draft you verify** — not a finished review, and not a hosted black
+box. See [What it is — and isn't](#what-it-is--and-isnt) and
+[How this compares](#how-this-compares).
+
 ```bash
 python cli.py "what makes an algorithm easy to understand"
 ```
+
+<!-- DEMO GIF: drop a screen-capture of a full run here once recorded, e.g.
+![lr_tool demo](examples/screenshots/demo.gif)
+Capture recipe is in examples/screenshots/README-capture.md -->
+[**▶ See a full run, step by step**](examples/#what-a-run-looks-like) (annotated screenshots).
 
 📄 **See real outputs:** the [`examples/`](examples/) directory has unedited runs across four
 domains — [LLM hallucinations](examples/llm-hallucinations.md),
@@ -19,6 +30,8 @@ domains — [LLM hallucinations](examples/llm-hallucinations.md),
 ## Table of contents
 
 - [Examples](examples/)
+- [What it is — and isn't](#what-it-is--and-isnt)
+- [How this compares](#how-this-compares)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -31,6 +44,62 @@ domains — [LLM hallucinations](examples/llm-hallucinations.md),
 - [Extending the tool](#extending-the-tool)
 - [Conventions](#conventions)
 - [Known limitations](#known-limitations)
+- [License](#license)
+
+---
+
+## What it is — and isn't
+
+**It is** a first-pass *discovery and hypothesis-generation* tool. You give it a question, it
+casts a wide net over the scholarly APIs, ranks and tiers everything transparently, and writes
+a cited draft you can read in minutes to get the lay of a field — then verify and build on.
+
+**It isn't** a systematic-review replacement or a finished-paper generator. It's abstract-only
+(no full-text analysis), the synthesis LLM can occasionally misattribute a claim, and it runs
+at a smaller scale than the well-funded hosted services. Treat the review as a *scaffold with
+sources attached*, not a citable result. Every paper is a real, resolvable DOI — but you still
+read the papers.
+
+Design choices that follow from that:
+
+- **Recall-first.** It keeps the long tail and *labels* it (highly / moderately / tangentially
+  / irrelevant) rather than silently dropping papers. For a literature review, missing a
+  relevant paper is the expensive mistake — so it errs toward showing you more, tiered.
+- **Transparent.** You see the candidate pool size, the score on every paper, and the tier.
+  Nothing about the ranking is hidden.
+- **Self-hostable.** Runs locally against your own model and keys. Your queries never leave
+  your machine (use a local Ollama and they don't touch any third party but the metadata APIs).
+
+---
+
+## How this compares
+
+There are excellent tools in this space, and lr_tool does **not** try to beat them at their own
+game. It occupies a different point on the map — open, local, transparent — and that's the
+honest pitch.
+
+| | **lr_tool** | Raw LLM ("find me papers") | Hosted Q&A (e.g. Consensus) | Hosted search (e.g. AI2 Paper Finder) |
+|---|---|---|---|---|
+| Real, resolvable citations | ✅ every paper a live DOI | ⚠️ can hallucinate DOIs | ✅ | ✅ |
+| Open-source / self-hostable | ✅ | ❌ | ❌ | ❌ |
+| Runs locally / private queries | ✅ (local model) | ❌ | ❌ | ❌ |
+| Transparent scoring + full candidate pool | ✅ | ❌ | ❌ | partial |
+| Hackable pipeline (swap ranker/source/model) | ✅ | ❌ | ❌ | ❌ |
+| Output | cited **draft review** | chat answer | claim-level answer | ranked results |
+| Full-text / claim extraction | ❌ abstract-only | varies | ✅ | more sophisticated |
+| Retrieval quality at scale, polish | smaller, single-dev | n/a | high | high |
+
+**Where it genuinely wins:** you can't or won't send queries to a hosted service (privacy, IP,
+unpublished work); you want a *reproducible, auditable* candidate set (meta-research,
+benchmarks, a citable methods section); or you want to *modify the machine*, not just use a
+search box.
+
+**Where a hosted tool is the better choice:** you just want the best results with zero setup,
+full-text reasoning, or claim-level answers. In that case, use AI2 Paper Finder or Consensus —
+lr_tool is for the slice of people their hosted-only model leaves out.
+
+> Honest framing: this is the *open, inspectable* version of a proven idea, with an opinionated
+> recall-first design — not a claim to out-retrieve better-funded teams.
 
 ---
 
@@ -423,3 +492,11 @@ fields, uses a `*_checked` negative-cache marker, and never raises. Then call it
   headless browser. Treat `--source acm` as best-effort only.
 - **LLM output is non-deterministic** even at low temperature on cloud models, so the
   refined query and review can vary slightly between identical runs.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Aryan Mishra. Free to use, modify, and self-host. The scholarly APIs it
+calls (Crossref, OpenAlex, Unpaywall, Semantic Scholar) have their own terms — be a polite
+citizen and set `CONTACT_EMAIL`.
