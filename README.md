@@ -25,6 +25,10 @@ domains — [LLM hallucinations](examples/llm-hallucinations.md),
 [human development](examples/human-development-life-course.md), and
 [legal compliance](examples/legal-compliance-checking.md).
 
+> **Status:** a solo, actively-developed project. It works end-to-end and is used in earnest,
+> but it's not a polished commercial product — expect rough edges. Issues, ideas, and PRs are
+> welcome. See [What it is — and isn't](#what-it-is--and-isnt) for honest scope.
+
 ---
 
 ## Table of contents
