@@ -82,7 +82,46 @@ def _tier_section(papers: list[dict], paper_urls: list[str]) -> list[str]:
     return lines
 
 
-def build_markdown(query, result, model, short_paper_urls, short_doi_urls, short_oa_urls) -> str:
+def _metadata_section(query: str, sq: dict) -> list[str]:
+    """Render the query-understanding audit block shown before the papers (under --show-metadata).
+
+    Surfaces what the tool decided *before* retrieval: the refined/focus queries and keywords,
+    the intent, every sense the model saw (marking the one(s) actually searched), and the exact
+    search strings issued to the source. Purely a transparency aid — it never affects ranking.
+    """
+    interps = sq.get("interpretations") or []
+    chosen = set(sq.get("chosen_senses") or [])
+    searches = sq.get("search_queries") or []
+
+    lines = ["## Query Understanding", "",
+             f"- **Original query:** {query}",
+             f"- **Refined query:** {sq['refined_query']}"]
+    if sq.get("focus_query"):
+        lines.append(f"- **Focus query:** {sq['focus_query']}")
+    lines += [f"- **Keywords:** {', '.join(sq['keywords']) or '—'}",
+              f"- **Intent:** {sq['intent'] or 'not classified'}",
+              ""]
+
+    if interps:
+        note = ("_The query was ambiguous; the model saw these senses"
+                + (" — ✓ marks the one(s) searched._" if chosen else "._"))
+        lines += [f"**Senses considered ({len(interps)}):**", "", note, ""]
+        for it in interps:
+            mark = "✓ " if it.get("label") in chosen else ""
+            lines.append(f"- {mark}**{_esc(it['label'])}** — searches: _{_esc(it['refined_query'])}_")
+        lines.append("")
+
+    if searches:
+        lines += ["**Search queries issued:**", ""]
+        lines += [f"- `{s}`" for s in searches]
+        lines.append("")
+
+    lines += ["---", ""]
+    return lines
+
+
+def build_markdown(query, result, model, short_paper_urls, short_doi_urls, short_oa_urls,
+                   show_metadata: bool = False) -> str:
     sq = result["structured_query"]
     papers = result["ranked"]
     review = result.get("review", "")
@@ -99,6 +138,10 @@ def build_markdown(query, result, model, short_paper_urls, short_doi_urls, short
         "",
         "---",
         "",
+    ]
+    if show_metadata:
+        lines += _metadata_section(query, sq)
+    lines += [
         f"## Papers ({result['records_retrieved']} retrieved, top {len(papers)} ranked)",
         "",
         "| # | Title | Authors | Year | Score | Abstract | DOI | OA |",
@@ -117,7 +160,8 @@ def build_markdown(query, result, model, short_paper_urls, short_doi_urls, short
     return "\n".join(lines)
 
 
-def save_markdown(query: str, result: dict, model: str, out_dir: Path) -> Path:
+def save_markdown(query: str, result: dict, model: str, out_dir: Path,
+                  show_metadata: bool = False) -> Path:
     """Shorten all the links, render the Markdown, and write ``<slug>.md``."""
     papers = result["ranked"]
     n = len(papers)
@@ -129,7 +173,8 @@ def save_markdown(query: str, result: dict, model: str, out_dir: Path) -> Path:
     print("[out] Shortening URLs...", file=sys.stderr, flush=True)
     # Shorten all three columns in one parallel pass, then split back out by section.
     short = shorten_urls(paper_urls + doi_urls + oa_urls)
-    md = build_markdown(query, result, model, short[:n], short[n:2 * n], short[2 * n:])
+    md = build_markdown(query, result, model, short[:n], short[n:2 * n], short[2 * n:],
+                        show_metadata=show_metadata)
 
     out_path = out_dir / f"{_slugify(query)}.md"
     out_path.write_text(md, encoding="utf-8")

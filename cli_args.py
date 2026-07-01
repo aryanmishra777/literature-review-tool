@@ -100,6 +100,14 @@ def build_parser() -> argparse.ArgumentParser:
              "under --json, and prompts are skipped automatically when stdin isn't a TTY.",
     )
     parser.add_argument(
+        "--show-metadata",
+        action="store_true",
+        help="Add a 'Query Understanding' block to the saved Markdown (before the papers): the "
+             "refined/focus queries, keywords, intent, every sense the model considered (marking "
+             "the one(s) searched), and the exact search strings issued. Transparency aid; does "
+             "not affect ranking. The same fields are always present in --json output.",
+    )
+    parser.add_argument(
         "--no-save",
         action="store_true",
         help="Do not write the output Markdown file to disk",

@@ -23,6 +23,11 @@ class StructuredQuery(BaseModel):
     # Distinct senses the query could mean; empty when unambiguous. The first entry mirrors
     # the top-level refined_query/focus_query (the model's primary guess).
     interpretations: list[QueryInterpretation] = Field(default_factory=list)
+    # Retrieval-time audit trail, filled in by the pipeline (not the model): the label(s) of the
+    # sense(s) actually searched (empty when the query was unambiguous) and the exact search
+    # strings issued to the source. Surfaced by the --show-metadata Markdown block.
+    chosen_senses: list[str] = Field(default_factory=list)
+    search_queries: list[str] = Field(default_factory=list)
 
 
 class Author(BaseModel):

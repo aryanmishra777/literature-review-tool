@@ -92,7 +92,8 @@ def _run_interactive(pipeline: LiteratureReviewPipeline, args, limit: int | None
     if not args.no_save and ranked:
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = save_markdown(args.query, result, args.model, out_dir)
+        out_path = save_markdown(args.query, result, args.model, out_dir,
+                                 show_metadata=args.show_metadata)
         print(f"\nSaved → {out_path}", file=sys.stderr)
 
 

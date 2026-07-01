@@ -84,16 +84,17 @@ class LiteratureReviewPipeline:
 
     def _resolve_interpretation(
         self, structured: StructuredQuery, disambiguate: DisambiguateFn | None
-    ) -> tuple[StructuredQuery, list[tuple[str, str | None, list[str]]], str | None, list[str]]:
+    ) -> tuple[StructuredQuery, list[tuple[str, str | None, list[str]]], str | None, list[str], list[str]]:
         """Pick one or more senses when the query is ambiguous, then steer retrieval to them.
 
-        Returns four things:
+        Returns five things:
           • the (possibly redirected) query for display/lexical scoring,
           • the **retrieval specs** — one ``(refined_query, focus_query, keywords)`` per chosen
             sense, so each sense gets its own two-pass search (merged by DOI downstream),
           • a *positive hint* (the chosen sense(s) flattened to text, appended to the embedding
             so the pick reaches the dominant semantic ranker), or ``None``,
-          • the *rejected* senses as text (negative anchors the ranker subtracts).
+          • the *rejected* senses as text (negative anchors the ranker subtracts),
+          • the **chosen sense label(s)** (empty when the query was unambiguous), for the audit trail.
 
         With <2 interpretations there is nothing to resolve — one spec, no hint, no negatives.
         Otherwise ask ``disambiguate``: the user may pick **several** senses (their literatures
@@ -103,7 +104,7 @@ class LiteratureReviewPipeline:
         interps = structured.interpretations
         if len(interps) < 2:
             spec = (structured.refined_query, structured.focus_query, structured.keywords)
-            return structured, [spec], None, []
+            return structured, [spec], None, [], []
 
         chosen = (disambiguate(structured) if disambiguate else None) or []
         if not chosen:
@@ -136,7 +137,7 @@ class LiteratureReviewPipeline:
         hint = ". ".join(self._sense_text(c) for c in chosen)
         negatives = [self._sense_text(it) for it in interps
                      if all(it is not c for c in chosen)]
-        return redirected, specs, hint, negatives
+        return redirected, specs, hint, negatives, [c.label for c in chosen]
 
     def run_retrieval(
         self,
@@ -150,7 +151,7 @@ class LiteratureReviewPipeline:
         """Stages 1–3: understand → retrieve → (enrich) → rank. No LLM synthesis."""
         _log("[1/4] Understanding query...")
         structured = self._qu.transform(query)
-        structured, specs, sem_hint, sem_negatives = self._resolve_interpretation(
+        structured, specs, sem_hint, sem_negatives, chosen_labels = self._resolve_interpretation(
             structured, disambiguate)
         _log(f'      refined  : "{structured.refined_query}"')
         _log(f"      keywords : {structured.keywords}")
@@ -162,13 +163,16 @@ class LiteratureReviewPipeline:
         # pass keeps the user's specific angle from being flattened, and multiple senses union
         # their literatures. All passes merge by DOI — order is irrelevant (ranking re-sorts).
         passes: list[list[CSLRecord]] = []
+        search_queries: list[str] = []
         for refined, focus, kws in specs:
             search = build_search_query(refined, kws)
             _log(f'      search   : "{search}"  (broad / recall)')
+            search_queries.append(f"{search}  (broad / recall)")
             passes.append(self._translator.search(search, limit=limit, workers=workers))
             if focus:
                 focus_search = build_search_query(focus, kws)
                 _log(f'      focus    : "{focus_search}"  (focused / precision)')
+                search_queries.append(f"{focus_search}  (focused / precision)")
                 passes.append(self._translator.search(focus_search, limit=limit, workers=workers))
         raw_records = _merge_by_doi(*passes)
         _log(f"      fetched {len(raw_records)} unique records")
@@ -207,6 +211,12 @@ class LiteratureReviewPipeline:
         # after ranking so a richer, more on-intent pool still honours --limit.
         if limit is not None:
             ranked = ranked[:limit]
+        # Record the retrieval audit trail (chosen sense(s) + exact search strings) on the query
+        # so --show-metadata / --json can surface how the search was actually run.
+        structured = structured.model_copy(update={
+            "chosen_senses": chosen_labels,
+            "search_queries": search_queries,
+        })
         return structured, records, ranked
 
     def tier_papers(
